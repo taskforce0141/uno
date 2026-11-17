@@ -12,6 +12,12 @@ import {
 import { doc, runTransaction, serverTimestamp } from 'firebase/firestore';
 import { auth, db, handleFirestoreError, OperationType } from './firebase';
 import { AVATAR_OPTIONS } from '../engine/gameTypes';
+import {
+  exchangeServerSessionOptional,
+  formatFirebaseAuthError,
+  logAuthDiagnostics,
+  requestServerGuestFallbackSession,
+} from './sessionService';
 
 export interface AppUser {
   uid: string;
@@ -58,22 +64,6 @@ export function saveStoredPrefs(prefs: Partial<StoredProfilePrefs>) {
   } catch {
     // ignore storage errors
   }
-}
-
-async function exchangeServerSession(
-  uid?: string,
-  guestFallback = false
-): Promise<{ uid: string; sessionToken: string }> {
-  const res = await fetch('/api/auth/session', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ uid, guestFallback }),
-  });
-  if (!res.ok) {
-    const data = await res.json().catch(() => ({}));
-    throw new Error(data.error || 'Failed to establish multiplayer session.');
-  }
-  return res.json();
 }
 
 function normalizeSafeName(username: string): string {
@@ -149,7 +139,16 @@ async function syncUserToFirestore(
           });
         }
       } catch (err) {
-        if (err instanceof Error && err.message.includes('Missing or insufficient permissions')) {
+        const fbCode = (err as { code?: string })?.code;
+        logAuthDiagnostics('Firestore profile sync warning', {
+          errorMessage: err instanceof Error ? err.message : String(err),
+          firebaseCode: fbCode,
+          endpoint: userPath,
+        });
+        if (
+          fbCode === 'permission-denied' ||
+          (err instanceof Error && err.message.includes('Missing or insufficient permissions'))
+        ) {
           handleFirestoreError(err, OperationType.WRITE, userPath);
         }
       }
@@ -175,7 +174,7 @@ export async function buildAppUserFromFirebase(
   saveStoredPrefs({ username, avatar });
 
   const stats = await syncUserToFirestore(firebaseUser, username, avatar);
-  const { sessionToken } = await exchangeServerSession(firebaseUser.uid, false);
+  const optionalSession = await exchangeServerSessionOptional(firebaseUser.uid);
 
   return {
     uid: firebaseUser.uid,
@@ -185,7 +184,7 @@ export async function buildAppUserFromFirebase(
     email: firebaseUser.email,
     gamesPlayed: stats.gamesPlayed,
     wins: stats.wins,
-    sessionToken,
+    sessionToken: optionalSession.sessionToken,
     authSource: 'firebase',
   };
 }
@@ -203,7 +202,10 @@ export async function loginAsGuest(usernameInput: string, avatarId: string): Pro
     return await buildAppUserFromFirebase(cred.user, cleanName, avatarId);
   } catch (err: unknown) {
     const code = (err as { code?: string })?.code || '';
-    // Graceful server-signed guest session when Firebase Anonymous provider is not yet enabled in Console
+    const message = err instanceof Error ? err.message : String(err);
+
+    // Only attempt server-signed guest fallback when Anonymous Auth is disabled in Firebase Console
+    // AND a live Express backend session endpoint is available.
     if (
       code === 'auth/operation-not-allowed' ||
       code === 'auth/admin-restricted-operation' ||
@@ -218,7 +220,12 @@ export async function loginAsGuest(usernameInput: string, avatarId: string): Pro
       } catch {
         // ignore
       }
-      const { uid, sessionToken } = await exchangeServerSession(existingGuestUid, true);
+
+      const { uid, sessionToken } = await requestServerGuestFallbackSession(
+        existingGuestUid,
+        code,
+        message
+      );
       const guestUser: AppUser = {
         uid,
         username: cleanName,
@@ -237,15 +244,20 @@ export async function loginAsGuest(usernameInput: string, avatarId: string): Pro
       }
       return guestUser;
     }
-    throw err;
+
+    throw formatFirebaseAuthError(err, 'Guest sign-in');
   }
 }
 
 export async function loginWithGoogle(): Promise<AppUser> {
-  const provider = new GoogleAuthProvider();
-  provider.setCustomParameters({ prompt: 'select_account' });
-  const cred = await signInWithPopup(auth, provider);
-  return buildAppUserFromFirebase(cred.user);
+  try {
+    const provider = new GoogleAuthProvider();
+    provider.setCustomParameters({ prompt: 'select_account' });
+    const cred = await signInWithPopup(auth, provider);
+    return await buildAppUserFromFirebase(cred.user);
+  } catch (err) {
+    throw formatFirebaseAuthError(err, 'Google sign-in');
+  }
 }
 
 export async function registerWithEmail(
@@ -258,14 +270,22 @@ export async function registerWithEmail(
   if (cleanName.length < 2) {
     throw new Error('Username must be at least 2 characters.');
   }
-  const cred = await createUserWithEmailAndPassword(auth, email.trim(), password);
-  await updateProfile(cred.user, { displayName: cleanName }).catch(() => {});
-  return buildAppUserFromFirebase(cred.user, cleanName, avatar);
+  try {
+    const cred = await createUserWithEmailAndPassword(auth, email.trim(), password);
+    await updateProfile(cred.user, { displayName: cleanName }).catch(() => {});
+    return await buildAppUserFromFirebase(cred.user, cleanName, avatar);
+  } catch (err) {
+    throw formatFirebaseAuthError(err, 'Account registration');
+  }
 }
 
 export async function loginWithEmail(email: string, password: string): Promise<AppUser> {
-  const cred = await signInWithEmailAndPassword(auth, email.trim(), password);
-  return buildAppUserFromFirebase(cred.user);
+  try {
+    const cred = await signInWithEmailAndPassword(auth, email.trim(), password);
+    return await buildAppUserFromFirebase(cred.user);
+  } catch (err) {
+    throw formatFirebaseAuthError(err, 'Email sign-in');
+  }
 }
 
 export async function updateUserProfileData(
@@ -302,14 +322,15 @@ export async function restoreFallbackGuestSession(): Promise<AppUser | null> {
     if (!raw) return null;
     const saved = JSON.parse(raw) as AppUser;
     if (!saved.uid) return null;
-    const { uid, sessionToken } = await exchangeServerSession(saved.uid, true);
+    const optionalSession = await exchangeServerSessionOptional(saved.uid);
+    if (!optionalSession.available) return null;
     const prefs = getStoredPrefs();
     return {
       ...saved,
-      uid,
+      uid: saved.uid,
       username: prefs.username || saved.username,
       avatar: prefs.avatar || saved.avatar,
-      sessionToken,
+      sessionToken: optionalSession.sessionToken,
       authSource: 'guest_session',
     };
   } catch {

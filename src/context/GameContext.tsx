@@ -10,6 +10,7 @@ import {
   returnRoomToLobby,
   startNextRound,
   startRoomGame,
+  subscribeToRoomFirestore,
   updatePlayerLobbyState,
   updateRoomSettings,
 } from '../services/roomService';
@@ -140,10 +141,33 @@ export function GameProvider({ children }: { children: React.ReactNode }) {
   const sessionToken = user?.sessionToken;
 
   useEffect(() => {
-    if (!activeRoomId || !sessionToken) {
+    if (!activeRoomId) {
       socketRef.current?.close();
       socketRef.current = null;
       return;
+    }
+
+    if (!sessionToken) {
+      socketRef.current?.close();
+      socketRef.current = null;
+      setConnectionStatus('connected');
+      const unsubFirestore = subscribeToRoomFirestore(
+        activeRoomId,
+        (nextRoom) => {
+          setRoom((prev) =>
+            prev && nextRoom.players.length === 0 && prev.players.length > 0
+              ? { ...nextRoom, players: prev.players }
+              : nextRoom
+          );
+        },
+        () => {
+          addToast('This private room was closed.', 'error');
+          clearRoom();
+        }
+      );
+      return () => {
+        unsubFirestore();
+      };
     }
 
     socketRef.current?.close();
@@ -158,7 +182,7 @@ export function GameProvider({ children }: { children: React.ReactNode }) {
       socketRef.current?.close();
       socketRef.current = null;
     };
-  }, [activeRoomId, sessionToken, handleSocketMessage]);
+  }, [activeRoomId, sessionToken, handleSocketMessage, addToast, clearRoom]);
 
   const attachRoom = useCallback(
     (nextRoom: RoomData, nextGame: PublicGameState | null = null, nextHand: UnoCard[] = []) => {

@@ -5,6 +5,7 @@ import {
   getDoc,
   getDocs,
   increment,
+  onSnapshot,
   orderBy,
   query,
   runTransaction,
@@ -21,7 +22,8 @@ import {
   UnoCard,
 } from '../engine/gameTypes';
 import { resolveRulesForMode } from '../engine/customRules';
-import { auth, db, OperationType } from './firebase';
+import { auth, db, handleFirestoreError, OperationType } from './firebase';
+import { buildApiUrl, USE_CLOUD_FUNCTIONS } from './sessionService';
 
 const ROOM_CODE_CHARS = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
 
@@ -127,13 +129,14 @@ async function apiRequest<T>(
   sessionToken: string,
   options: RequestInit = {}
 ): Promise<T> {
+  const targetUrl = buildApiUrl(url);
   let res: Response;
   try {
-    res = await fetch(url, {
+    res = await fetch(targetUrl, {
       ...options,
       headers: {
         'Content-Type': 'application/json',
-        Authorization: `Bearer ${sessionToken}`,
+        ...(sessionToken ? { Authorization: `Bearer ${sessionToken}` } : {}),
         ...(options.headers || {}),
       },
     });
@@ -450,35 +453,39 @@ export async function lookupRoomByCode(
     throw new Error('Room code must be 6 letters or numbers.');
   }
 
-  try {
-    return await apiRequest<RoomLookupInfo>(
-      `/api/rooms/lookup/${encodeURIComponent(clean)}`,
-      sessionToken
-    );
-  } catch (apiErr) {
-    if (auth.currentUser) {
-      try {
-        const codeSnap = await getDoc(doc(db, 'roomCodes', clean));
-        if (codeSnap.exists()) {
-          const data = codeSnap.data();
-          return {
-            roomId: String(data.roomId),
-            roomCode: clean,
-            roomName: 'Private UNO Room',
-            gameMode: 'classic',
-            playerCount: 1,
-            maxPlayers: 10,
-            status: 'waiting',
-            allowLateJoining: false,
-            allowSpectators: false,
-          };
-        }
-      } catch {
-        // ignore and surface original lookup error
+  if (sessionToken) {
+    try {
+      return await apiRequest<RoomLookupInfo>(
+        `/api/rooms/lookup/${encodeURIComponent(clean)}`,
+        sessionToken
+      );
+    } catch (apiErr) {
+      if (!auth.currentUser) {
+        throw apiErr;
       }
     }
-    throw apiErr;
   }
+
+  if (auth.currentUser) {
+    const codeSnap = await getDoc(doc(db, 'roomCodes', clean));
+    if (codeSnap.exists()) {
+      const data = codeSnap.data();
+      return {
+        roomId: String(data.roomId),
+        roomCode: clean,
+        roomName: 'Private UNO Room',
+        gameMode: 'classic',
+        playerCount: 1,
+        maxPlayers: 10,
+        status: 'waiting',
+        allowLateJoining: false,
+        allowSpectators: false,
+      };
+    }
+    throw new Error('Private room not found. Check your 6-character code.');
+  }
+
+  throw new Error('Authentication required to look up a private room.');
 }
 
 export async function joinRoom(
@@ -489,135 +496,138 @@ export async function joinRoom(
   const safeUsername = normalizeUsername(params.username, 'Player');
   const safeAvatar = (params.avatar || 'cobalt').trim().slice(0, 128) || 'cobalt';
 
-  try {
-    const res = await apiRequest<RoomStateResponse>(
-      `/api/rooms/${encodeURIComponent(roomIdOrCode)}/join`,
-      sessionToken,
-      {
-        method: 'POST',
-        body: JSON.stringify({ ...params, username: safeUsername, avatar: safeAvatar }),
+  if (sessionToken) {
+    try {
+      const res = await apiRequest<RoomStateResponse>(
+        `/api/rooms/${encodeURIComponent(roomIdOrCode)}/join`,
+        sessionToken,
+        {
+          method: 'POST',
+          body: JSON.stringify({ ...params, username: safeUsername, avatar: safeAvatar }),
+        }
+      );
+
+      if (!res || !res.room || !res.room.roomId) {
+        throw new Error('Invalid room response received when joining.');
       }
-    );
 
-    if (!res || !res.room || !res.room.roomId) {
-      throw new Error('Invalid room response received when joining.');
-    }
-
-    // Mirror joining player to Firestore so refreshes and Firestore rules stay consistent
-    const firebaseUser = auth.currentUser;
-    if (firebaseUser) {
-      try {
-        const roomRef = doc(db, 'rooms', res.room.roomId);
-        const playerRef = doc(db, 'rooms', res.room.roomId, 'players', firebaseUser.uid);
-        await runTransaction(db, async (tx) => {
-          const roomSnap = await tx.get(roomRef);
-          if (!roomSnap.exists()) return;
-          const playerSnap = await tx.get(playerRef);
-          if (!playerSnap.exists()) {
-            tx.set(playerRef, {
-              playerId: firebaseUser.uid,
-              roomId: res.room.roomId,
-              username: safeUsername,
-              avatar: safeAvatar,
-              isHost: res.room.hostId === firebaseUser.uid,
-              isReady: res.room.hostId === firebaseUser.uid,
-              cardCount: 0,
-              connectionStatus: 'online',
-              joinedAt: serverTimestamp(),
-              lastSeen: serverTimestamp(),
-            });
-            tx.update(roomRef, {
-              playerCount: increment(1),
-              updatedAt: serverTimestamp(),
-            });
-          } else {
-            tx.update(playerRef, {
-              username: safeUsername,
-              avatar: safeAvatar,
-              connectionStatus: 'online',
-              lastSeen: serverTimestamp(),
-            });
-          }
-        });
-      } catch {
-        // Non-fatal if Firestore sync races
+      const firebaseUser = auth.currentUser;
+      if (firebaseUser) {
+        try {
+          const roomRef = doc(db, 'rooms', res.room.roomId);
+          const playerRef = doc(db, 'rooms', res.room.roomId, 'players', firebaseUser.uid);
+          await runTransaction(db, async (tx) => {
+            const roomSnap = await tx.get(roomRef);
+            if (!roomSnap.exists()) return;
+            const playerSnap = await tx.get(playerRef);
+            if (!playerSnap.exists()) {
+              tx.set(playerRef, {
+                playerId: firebaseUser.uid,
+                roomId: res.room.roomId,
+                username: safeUsername,
+                avatar: safeAvatar,
+                isHost: res.room.hostId === firebaseUser.uid,
+                isReady: res.room.hostId === firebaseUser.uid,
+                cardCount: 0,
+                connectionStatus: 'online',
+                joinedAt: serverTimestamp(),
+                lastSeen: serverTimestamp(),
+              });
+              tx.update(roomRef, {
+                playerCount: increment(1),
+                updatedAt: serverTimestamp(),
+              });
+            } else {
+              tx.update(playerRef, {
+                username: safeUsername,
+                avatar: safeAvatar,
+                connectionStatus: 'online',
+                lastSeen: serverTimestamp(),
+              });
+            }
+          });
+        } catch {
+          // Non-fatal if Firestore sync races
+        }
       }
-    }
 
-    return res;
-  } catch (apiErr) {
-    // Firestore direct join fallback if server API is unreachable or restarted
-    const firebaseUser = auth.currentUser;
-    if (!firebaseUser) {
-      throw apiErr;
-    }
-
-    const clean = roomIdOrCode.trim();
-    let targetRoomId = clean;
-    if (/^[A-Za-z0-9]{6}$/.test(clean)) {
-      const codeSnap = await getDoc(doc(db, 'roomCodes', clean.toUpperCase()));
-      if (!codeSnap.exists()) {
+      return res;
+    } catch (apiErr) {
+      if (!auth.currentUser) {
         throw apiErr;
       }
-      targetRoomId = String(codeSnap.data().roomId);
     }
+  }
 
-    try {
-      const roomRef = doc(db, 'rooms', targetRoomId);
-      const playerRef = doc(db, 'rooms', targetRoomId, 'players', firebaseUser.uid);
-      await runTransaction(db, async (tx) => {
-        const pSnap = await tx.get(playerRef);
-        if (!pSnap.exists()) {
-          tx.set(playerRef, {
-            playerId: firebaseUser.uid,
-            roomId: targetRoomId,
-            username: safeUsername,
-            avatar: safeAvatar,
-            isHost: false,
-            isReady: false,
-            cardCount: 0,
-            connectionStatus: 'online',
-            joinedAt: serverTimestamp(),
-            lastSeen: serverTimestamp(),
-          });
-          tx.update(roomRef, {
-            playerCount: increment(1),
-            updatedAt: serverTimestamp(),
-          });
-        } else {
-          tx.update(playerRef, {
-            username: safeUsername,
-            avatar: safeAvatar,
-            connectionStatus: 'online',
-            lastSeen: serverTimestamp(),
-          });
-        }
-      });
+  const firebaseUser = auth.currentUser;
+  if (!firebaseUser) {
+    throw new Error('Authentication required to join a private room.');
+  }
 
-      const room = await readRoomFromFirestore(targetRoomId);
-      // Re-hydrate Express server if reachable
-      if (sessionToken) {
-        await apiRequest('/api/rooms', sessionToken, {
-          method: 'POST',
-          body: JSON.stringify({
-            roomId: room.roomId,
-            roomCode: room.roomCode,
-            hostId: room.hostId,
-            roomName: room.roomName,
-            gameMode: room.gameMode,
-            maxPlayers: room.maxPlayers,
-            customRules: room.customRules,
-            players: room.players,
-            username: safeUsername,
-            avatar: safeAvatar,
-          }),
-        }).catch(() => {});
+  const clean = roomIdOrCode.trim();
+  let targetRoomId = clean;
+  if (/^[A-Za-z0-9]{6}$/.test(clean)) {
+    const codeSnap = await getDoc(doc(db, 'roomCodes', clean.toUpperCase()));
+    if (!codeSnap.exists()) {
+      throw new Error('Private room not found. Check your 6-character code.');
+    }
+    targetRoomId = String(codeSnap.data().roomId);
+  }
+
+  try {
+    const roomRef = doc(db, 'rooms', targetRoomId);
+    const playerRef = doc(db, 'rooms', targetRoomId, 'players', firebaseUser.uid);
+    await runTransaction(db, async (tx) => {
+      const pSnap = await tx.get(playerRef);
+      if (!pSnap.exists()) {
+        tx.set(playerRef, {
+          playerId: firebaseUser.uid,
+          roomId: targetRoomId,
+          username: safeUsername,
+          avatar: safeAvatar,
+          isHost: false,
+          isReady: false,
+          cardCount: 0,
+          connectionStatus: 'online',
+          joinedAt: serverTimestamp(),
+          lastSeen: serverTimestamp(),
+        });
+        tx.update(roomRef, {
+          playerCount: increment(1),
+          updatedAt: serverTimestamp(),
+        });
+      } else {
+        tx.update(playerRef, {
+          username: safeUsername,
+          avatar: safeAvatar,
+          connectionStatus: 'online',
+          lastSeen: serverTimestamp(),
+        });
       }
+    });
 
-      return { room, gameState: null, hand: [] };
-    } catch {
-      throw apiErr;
+    const room = await readRoomFromFirestore(targetRoomId);
+    if (sessionToken) {
+      await apiRequest('/api/rooms', sessionToken, {
+        method: 'POST',
+        body: JSON.stringify({
+          roomId: room.roomId,
+          roomCode: room.roomCode,
+          hostId: room.hostId,
+          roomName: room.roomName,
+          gameMode: room.gameMode,
+          maxPlayers: room.maxPlayers,
+          customRules: room.customRules,
+          players: room.players,
+          username: safeUsername,
+          avatar: safeAvatar,
+        }),
+      }).catch(() => {});
     }
+
+    return { room, gameState: null, hand: [] };
+  } catch (err) {
+    throw mapFirebaseRoomError(err, `rooms/${targetRoomId}/players/${firebaseUser.uid}`);
   }
 }
 
@@ -625,21 +635,22 @@ export async function fetchRoomState(
   sessionToken: string,
   roomId: string
 ): Promise<RoomStateResponse> {
-  try {
-    const res = await apiRequest<RoomStateResponse>(
-      `/api/rooms/${encodeURIComponent(roomId)}/state`,
-      sessionToken
-    );
-    if (res && res.room && res.room.roomId) {
-      return res;
-    }
-  } catch (apiErr) {
-    if (!auth.currentUser) {
-      throw apiErr;
+  if (sessionToken) {
+    try {
+      const res = await apiRequest<RoomStateResponse>(
+        `/api/rooms/${encodeURIComponent(roomId)}/state`,
+        sessionToken
+      );
+      if (res && res.room && res.room.roomId) {
+        return res;
+      }
+    } catch (apiErr) {
+      if (!auth.currentUser) {
+        throw apiErr;
+      }
     }
   }
 
-  // Fallback / reload hydration from Firestore
   const room = await readRoomFromFirestore(roomId);
   const uid = auth.currentUser?.uid;
   if (uid && !room.players.some((p) => p.id === uid) && room.hostId !== uid) {
@@ -665,6 +676,107 @@ export async function fetchRoomState(
   return { room, gameState: null, hand: [] };
 }
 
+export function subscribeToRoomFirestore(
+  roomId: string,
+  onRoomUpdate: (room: RoomData) => void,
+  onRoomClosed: () => void
+): () => void {
+  if (!auth.currentUser) return () => {};
+
+  let latestRoomDoc: Record<string, unknown> | null = null;
+  let latestPlayers: PlayerRecord[] = [];
+  let hasRoom = false;
+  let hasPlayers = false;
+
+  const emitIfReady = () => {
+    if (!hasRoom || !latestRoomDoc) return;
+    if (latestRoomDoc.status === 'closed') {
+      onRoomClosed();
+      return;
+    }
+    const gameMode: GameMode = ['classic', 'flip', 'custom'].includes(
+      String(latestRoomDoc.gameMode)
+    )
+      ? (latestRoomDoc.gameMode as GameMode)
+      : 'classic';
+
+    onRoomUpdate({
+      roomId: String(latestRoomDoc.roomId || roomId),
+      roomCode: String(latestRoomDoc.roomCode || ''),
+      roomName: String(latestRoomDoc.roomName || 'UNO Arena Room'),
+      hostId: String(latestRoomDoc.hostId || ''),
+      privacy: 'private',
+      gameMode,
+      maxPlayers: Math.min(10, Math.max(2, Number(latestRoomDoc.maxPlayers || 10))),
+      status: (['waiting', 'lobby', 'playing', 'finished', 'closed'].includes(
+        String(latestRoomDoc.status)
+      )
+        ? latestRoomDoc.status
+        : 'waiting') as RoomData['status'],
+      customRules: resolveRulesForMode(
+        gameMode,
+        (latestRoomDoc.customRules as Partial<CustomRulesConfig>) || {}
+      ),
+      players: hasPlayers ? latestPlayers : [],
+      createdAt: toMillis(latestRoomDoc.createdAt),
+      updatedAt: toMillis(latestRoomDoc.updatedAt),
+    });
+  };
+
+  const unsubRoom = onSnapshot(
+    doc(db, 'rooms', roomId),
+    (snap) => {
+      if (!snap.exists()) {
+        onRoomClosed();
+        return;
+      }
+      latestRoomDoc = snap.data();
+      hasRoom = true;
+      emitIfReady();
+    },
+    (err) => {
+      if (err.message.includes('Missing or insufficient permissions')) {
+        handleFirestoreError(err, OperationType.GET, `rooms/${roomId}`);
+      }
+    }
+  );
+
+  const unsubPlayers = onSnapshot(
+    query(collection(db, 'rooms', roomId, 'players'), orderBy('joinedAt', 'asc')),
+    (snap) => {
+      latestPlayers = snap.docs.map((pDoc) => {
+        const p = pDoc.data();
+        return {
+          id: String(p.playerId || pDoc.id),
+          username: String(p.username || 'Player'),
+          avatar: String(p.avatar || 'crimson'),
+          isHost: Boolean(p.isHost),
+          isReady: Boolean(p.isReady),
+          isSpectator: false,
+          connectionStatus:
+            p.connectionStatus === 'reconnecting' || p.connectionStatus === 'offline'
+              ? p.connectionStatus
+              : 'online',
+          joinedAt: toMillis(p.joinedAt),
+          lastSeen: toMillis(p.lastSeen),
+        };
+      });
+      hasPlayers = true;
+      emitIfReady();
+    },
+    (err) => {
+      if (err.message.includes('Missing or insufficient permissions')) {
+        handleFirestoreError(err, OperationType.LIST, `rooms/${roomId}/players`);
+      }
+    }
+  );
+
+  return () => {
+    unsubRoom();
+    unsubPlayers();
+  };
+}
+
 export async function updatePlayerLobbyState(
   sessionToken: string,
   roomId: string,
@@ -687,22 +799,23 @@ export async function updatePlayerLobbyState(
     );
   }
 
-  try {
-    return await apiRequest<{ room: RoomData }>(
-      `/api/rooms/${encodeURIComponent(roomId)}/player`,
-      sessionToken,
-      {
-        method: 'PATCH',
-        body: JSON.stringify(updates),
-      }
-    );
-  } catch (err) {
-    if (firebaseUser) {
-      const room = await readRoomFromFirestore(roomId);
-      return { room };
+  if (sessionToken) {
+    try {
+      return await apiRequest<{ room: RoomData }>(
+        `/api/rooms/${encodeURIComponent(roomId)}/player`,
+        sessionToken,
+        {
+          method: 'PATCH',
+          body: JSON.stringify(updates),
+        }
+      );
+    } catch (err) {
+      if (!firebaseUser) throw err;
     }
-    throw err;
   }
+
+  const room = await readRoomFromFirestore(roomId);
+  return { room };
 }
 
 export async function updateRoomSettings(
@@ -733,22 +846,23 @@ export async function updateRoomSettings(
     await updateDoc(doc(db, 'rooms', roomId), fsUpdates).catch(() => {});
   }
 
-  try {
-    return await apiRequest<{ room: RoomData }>(
-      `/api/rooms/${encodeURIComponent(roomId)}/settings`,
-      sessionToken,
-      {
-        method: 'PATCH',
-        body: JSON.stringify(settings),
-      }
-    );
-  } catch (err) {
-    if (firebaseUser) {
-      const room = await readRoomFromFirestore(roomId);
-      return { room };
+  if (sessionToken) {
+    try {
+      return await apiRequest<{ room: RoomData }>(
+        `/api/rooms/${encodeURIComponent(roomId)}/settings`,
+        sessionToken,
+        {
+          method: 'PATCH',
+          body: JSON.stringify(settings),
+        }
+      );
+    } catch (err) {
+      if (!firebaseUser) throw err;
     }
-    throw err;
   }
+
+  const room = await readRoomFromFirestore(roomId);
+  return { room };
 }
 
 export async function kickPlayerFromRoom(
@@ -759,23 +873,33 @@ export async function kickPlayerFromRoom(
   if (auth.currentUser) {
     await deleteDoc(doc(db, 'rooms', roomId, 'players', playerId)).catch(() => {});
   }
-  return apiRequest<{ room: RoomData }>(
-    `/api/rooms/${encodeURIComponent(roomId)}/kick`,
-    sessionToken,
-    {
-      method: 'POST',
-      body: JSON.stringify({ playerId }),
+  if (sessionToken) {
+    try {
+      return await apiRequest<{ room: RoomData }>(
+        `/api/rooms/${encodeURIComponent(roomId)}/kick`,
+        sessionToken,
+        {
+          method: 'POST',
+          body: JSON.stringify({ playerId }),
+        }
+      );
+    } catch (err) {
+      if (!auth.currentUser) throw err;
     }
-  );
+  }
+  const room = await readRoomFromFirestore(roomId);
+  return { room };
 }
 
 export async function leaveRoom(sessionToken: string, roomId: string): Promise<void> {
   if (auth.currentUser) {
     await deleteDoc(doc(db, 'rooms', roomId, 'players', auth.currentUser.uid)).catch(() => {});
   }
-  await apiRequest(`/api/rooms/${encodeURIComponent(roomId)}/leave`, sessionToken, {
-    method: 'POST',
-  }).catch(() => {});
+  if (sessionToken) {
+    await apiRequest(`/api/rooms/${encodeURIComponent(roomId)}/leave`, sessionToken, {
+      method: 'POST',
+    }).catch(() => {});
+  }
 }
 
 export async function closeRoom(sessionToken: string, roomId: string): Promise<void> {
@@ -785,15 +909,22 @@ export async function closeRoom(sessionToken: string, roomId: string): Promise<v
       updatedAt: serverTimestamp(),
     }).catch(() => {});
   }
-  await apiRequest(`/api/rooms/${encodeURIComponent(roomId)}/close`, sessionToken, {
-    method: 'POST',
-  }).catch(() => {});
+  if (sessionToken) {
+    await apiRequest(`/api/rooms/${encodeURIComponent(roomId)}/close`, sessionToken, {
+      method: 'POST',
+    }).catch(() => {});
+  }
 }
 
 export async function startRoomGame(
   sessionToken: string,
   roomId: string
 ): Promise<RoomStateResponse> {
+  if (!sessionToken && !USE_CLOUD_FUNCTIONS) {
+    throw new Error(
+      'Starting a live match requires a connected multiplayer server (VITE_API_BASE_URL) or deployed Cloud Functions (VITE_USE_CLOUD_FUNCTIONS=true).'
+    );
+  }
   return apiRequest<RoomStateResponse>(
     `/api/rooms/${encodeURIComponent(roomId)}/start`,
     sessionToken,

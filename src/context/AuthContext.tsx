@@ -11,6 +11,7 @@ import {
   subscribeToFirebaseAuth,
   updateUserProfileData,
 } from '../services/authService';
+import { logAuthDiagnostics } from '../services/sessionService';
 import { soundFx } from '../utils/soundFx';
 
 export type ThemeMode = 'dark' | 'light';
@@ -108,8 +109,11 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         try {
           const appUser = await buildAppUserFromFirebase(firebaseUser);
           setUser(appUser);
-        } catch {
-          // If session exchange fails transiently, keep authReady moving
+        } catch (err) {
+          logAuthDiagnostics('onAuthStateChanged profile hydration error', {
+            errorMessage: err instanceof Error ? err.message : String(err),
+            firebaseCode: (err as { code?: string })?.code,
+          });
         } finally {
           setAuthReady(true);
         }

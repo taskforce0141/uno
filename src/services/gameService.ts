@@ -1,4 +1,5 @@
 import { CardColor, PublicGameState, RoomData, UnoCard } from '../engine/gameTypes';
+import { API_BASE_URL, buildApiUrl } from './sessionService';
 
 export type SocketMessage =
   | { type: 'state_sync'; room: RoomData; gameState: PublicGameState | null; hand: UnoCard[] }
@@ -24,8 +25,14 @@ export function createGameWebSocket(
     if (closedManually) return;
     onStatusChange(ws ? 'reconnecting' : 'connecting');
 
-    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const url = `${protocol}//${window.location.host}/ws?roomId=${encodeURIComponent(roomId)}&token=${encodeURIComponent(sessionToken)}`;
+    let wsBase: string;
+    if (API_BASE_URL) {
+      wsBase = API_BASE_URL.replace(/^http:/, 'ws:').replace(/^https:/, 'wss:');
+    } else {
+      const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+      wsBase = `${protocol}//${window.location.host}`;
+    }
+    const url = `${wsBase}/ws?roomId=${encodeURIComponent(roomId)}&token=${encodeURIComponent(sessionToken)}`;
     ws = new WebSocket(url);
 
     ws.onopen = () => {
@@ -75,7 +82,7 @@ export function createGameWebSocket(
         );
       } else {
         // REST fallback when socket is mid-reconnect
-        fetch(`/api/rooms/${encodeURIComponent(roomId)}/action`, {
+        fetch(buildApiUrl(`/api/rooms/${encodeURIComponent(roomId)}/action`), {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
@@ -100,7 +107,7 @@ export async function submitRestAction(
   actionType: string,
   payload: Record<string, unknown> = {}
 ) {
-  const res = await fetch(`/api/rooms/${encodeURIComponent(roomId)}/action`, {
+  const res = await fetch(buildApiUrl(`/api/rooms/${encodeURIComponent(roomId)}/action`), {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
