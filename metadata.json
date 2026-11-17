@@ -1,0 +1,6 @@
+{
+  "name": "UNO ARENA",
+  "description": "Real-time multiplayer card arena featuring Classic, Flip, and Custom UNO modes in private invite-only rooms.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

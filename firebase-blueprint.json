@@ -1,0 +1,369 @@
+{
+  "entities": {
+    "UserProfile": {
+      "title": "UserProfile",
+      "description": "Public display profile for an UNO ARENA player (no PII).",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "username": {
+          "type": "string",
+          "minLength": 2,
+          "maxLength": 24
+        },
+        "avatar": {
+          "type": "string",
+          "maxLength": 128
+        },
+        "isAnonymous": {
+          "type": "boolean"
+        },
+        "gamesPlayed": {
+          "type": "number"
+        },
+        "wins": {
+          "type": "number"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["uid", "username", "avatar", "isAnonymous", "gamesPlayed", "wins", "createdAt", "updatedAt"]
+    },
+    "UserPrivateInfo": {
+      "title": "UserPrivateInfo",
+      "description": "Strictly isolated PII record for a registered user.",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "email": {
+          "type": "string",
+          "maxLength": 254
+        },
+        "providerId": {
+          "type": "string",
+          "maxLength": 64
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["uid", "providerId", "updatedAt"]
+    },
+    "RoomCodeLookup": {
+      "title": "RoomCodeLookup",
+      "description": "Single-code lookup mapping a 6-character private room code to its roomId.",
+      "type": "object",
+      "properties": {
+        "roomCode": {
+          "type": "string",
+          "minLength": 6,
+          "maxLength": 6,
+          "pattern": "^[A-Z0-9]{6}$"
+        },
+        "roomId": {
+          "type": "string",
+          "maxLength": 64,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "hostId": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["roomCode", "roomId", "hostId", "createdAt"]
+    },
+    "Room": {
+      "title": "Room",
+      "description": "Private multiplayer UNO room metadata and rules configuration.",
+      "type": "object",
+      "properties": {
+        "roomId": {
+          "type": "string",
+          "maxLength": 64,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "roomCode": {
+          "type": "string",
+          "minLength": 6,
+          "maxLength": 6,
+          "pattern": "^[A-Z0-9]{6}$"
+        },
+        "roomName": {
+          "type": "string",
+          "minLength": 2,
+          "maxLength": 40
+        },
+        "hostId": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "privacy": {
+          "type": "string",
+          "enum": ["private"]
+        },
+        "gameMode": {
+          "type": "string",
+          "enum": ["classic", "flip", "custom"]
+        },
+        "maxPlayers": {
+          "type": "number"
+        },
+        "playerCount": {
+          "type": "number"
+        },
+        "status": {
+          "type": "string",
+          "enum": ["waiting", "lobby", "playing", "finished", "closed"]
+        },
+        "customRules": {
+          "type": "object"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["roomId", "roomCode", "roomName", "hostId", "privacy", "gameMode", "maxPlayers", "playerCount", "status", "customRules", "createdAt", "updatedAt"]
+    },
+    "RoomPlayer": {
+      "title": "RoomPlayer",
+      "description": "A participant in a private UNO room.",
+      "type": "object",
+      "properties": {
+        "playerId": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "roomId": {
+          "type": "string",
+          "maxLength": 64,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "username": {
+          "type": "string",
+          "minLength": 2,
+          "maxLength": 24
+        },
+        "avatar": {
+          "type": "string",
+          "maxLength": 128
+        },
+        "isHost": {
+          "type": "boolean"
+        },
+        "isReady": {
+          "type": "boolean"
+        },
+        "cardCount": {
+          "type": "number"
+        },
+        "connectionStatus": {
+          "type": "string",
+          "enum": ["online", "reconnecting", "offline"]
+        },
+        "joinedAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "lastSeen": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["playerId", "roomId", "username", "avatar", "isHost", "isReady", "cardCount", "connectionStatus", "joinedAt", "lastSeen"]
+    },
+    "GameState": {
+      "title": "GameState",
+      "description": "Public authoritative game state for a room (never contains private hands or deck).",
+      "type": "object",
+      "properties": {
+        "roomId": {
+          "type": "string",
+          "maxLength": 64,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "currentPlayerId": {
+          "type": "string",
+          "maxLength": 128
+        },
+        "currentDirection": {
+          "type": "number"
+        },
+        "currentColor": {
+          "type": "string",
+          "maxLength": 16
+        },
+        "currentSide": {
+          "type": "string",
+          "enum": ["light", "dark"]
+        },
+        "discardTopCard": {
+          "type": "object"
+        },
+        "drawPileCount": {
+          "type": "number"
+        },
+        "gameStatus": {
+          "type": "string",
+          "enum": ["waiting", "playing", "round_over", "finished"]
+        },
+        "roundNumber": {
+          "type": "number"
+        },
+        "winnerId": {
+          "type": "string",
+          "maxLength": 128
+        },
+        "lastAction": {
+          "type": "string",
+          "maxLength": 160
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["roomId", "currentPlayerId", "currentDirection", "currentColor", "currentSide", "drawPileCount", "gameStatus", "roundNumber", "updatedAt"]
+    },
+    "PlayerHand": {
+      "title": "PlayerHand",
+      "description": "Private card hand readable only by the owning player and server.",
+      "type": "object",
+      "properties": {
+        "playerId": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "cards": {
+          "type": "array"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["playerId", "cards", "updatedAt"]
+    },
+    "GameAction": {
+      "title": "GameAction",
+      "description": "Submitted move or game action event.",
+      "type": "object",
+      "properties": {
+        "actionId": {
+          "type": "string",
+          "maxLength": 64,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "playerId": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "actionType": {
+          "type": "string",
+          "maxLength": 32
+        },
+        "details": {
+          "type": "string",
+          "maxLength": 256
+        },
+        "timestamp": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["actionId", "playerId", "actionType", "details", "timestamp"]
+    },
+    "GameActivity": {
+      "title": "GameActivity",
+      "description": "Public game activity log entry.",
+      "type": "object",
+      "properties": {
+        "activityId": {
+          "type": "string",
+          "maxLength": 64,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "playerId": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "message": {
+          "type": "string",
+          "maxLength": 200
+        },
+        "timestamp": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["activityId", "playerId", "message", "timestamp"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": { "$ref": "#/entities/UserProfile" },
+      "description": "Public player profile documents."
+    },
+    "/users/{userId}/private/{docId}": {
+      "schema": { "$ref": "#/entities/UserPrivateInfo" },
+      "description": "Private PII documents accessible only by the owner."
+    },
+    "/roomCodes/{roomCode}": {
+      "schema": { "$ref": "#/entities/RoomCodeLookup" },
+      "description": "Exact-match room code lookup index (no listing allowed)."
+    },
+    "/rooms/{roomId}": {
+      "schema": { "$ref": "#/entities/Room" },
+      "description": "Private multiplayer game rooms."
+    },
+    "/rooms/{roomId}/players/{playerId}": {
+      "schema": { "$ref": "#/entities/RoomPlayer" },
+      "description": "Players participating in a private room."
+    },
+    "/rooms/{roomId}/game/state": {
+      "schema": { "$ref": "#/entities/GameState" },
+      "description": "Public synchronized game state (server-authoritative)."
+    },
+    "/rooms/{roomId}/game/hands/{playerId}": {
+      "schema": { "$ref": "#/entities/PlayerHand" },
+      "description": "Private player card hand (owner-read only, server-write only)."
+    },
+    "/rooms/{roomId}/game/actions/{actionId}": {
+      "schema": { "$ref": "#/entities/GameAction" },
+      "description": "Audit log of submitted player actions."
+    },
+    "/rooms/{roomId}/game/activity/{activityId}": {
+      "schema": { "$ref": "#/entities/GameActivity" },
+      "description": "Game activity feed entries for room members."
+    }
+  }
+}

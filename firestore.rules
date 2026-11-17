@@ -1,0 +1,273 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // 1. Global Default-Deny Safety Net
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // 2. Hardened Primitives
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function isValidRoomCode(code) {
+      return code is string && code.size() == 6 && code.matches('^[A-Z0-9]{6}$');
+    }
+
+    function isRoomMember(roomId) {
+      return isSignedIn() && exists(/databases/$(database)/documents/rooms/$(roomId)/players/$(request.auth.uid));
+    }
+
+    function isRoomHost(roomId) {
+      return isSignedIn() && get(/databases/$(database)/documents/rooms/$(roomId)).data.hostId == request.auth.uid;
+    }
+
+    // 3. Entity Validation Blueprints
+    function isValidUserProfile(data, userId) {
+      return data.keys().hasAll(['uid', 'username', 'avatar', 'isAnonymous', 'gamesPlayed', 'wins', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly(['uid', 'username', 'avatar', 'isAnonymous', 'gamesPlayed', 'wins', 'createdAt', 'updatedAt'])
+        && data.uid == userId
+        && isValidId(data.uid)
+        && data.username is string && data.username.size() >= 2 && data.username.size() <= 24
+        && data.avatar is string && data.avatar.size() >= 1 && data.avatar.size() <= 128
+        && data.isAnonymous is bool
+        && data.gamesPlayed is int && data.gamesPlayed >= 0
+        && data.wins is int && data.wins >= 0
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidUserPrivateInfo(data, userId) {
+      return data.keys().hasAll(['uid', 'providerId', 'updatedAt'])
+        && data.keys().hasOnly(['uid', 'email', 'providerId', 'updatedAt'])
+        && data.uid == userId
+        && isValidId(data.uid)
+        && data.providerId is string && data.providerId.size() >= 1 && data.providerId.size() <= 64
+        && (!('email' in data) || (data.email is string && data.email.size() <= 254))
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidRoomCodeLookup(data, roomCode) {
+      return data.keys().hasAll(['roomCode', 'roomId', 'hostId', 'createdAt'])
+        && data.keys().hasOnly(['roomCode', 'roomId', 'hostId', 'createdAt'])
+        && data.roomCode == roomCode
+        && isValidRoomCode(data.roomCode)
+        && isValidId(data.roomId)
+        && data.hostId == request.auth.uid
+        && isValidId(data.hostId)
+        && data.createdAt == request.time;
+    }
+
+    function isValidRoom(data, roomId) {
+      return data.keys().hasAll(['roomId', 'roomCode', 'roomName', 'hostId', 'privacy', 'gameMode', 'maxPlayers', 'playerCount', 'status', 'customRules', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly(['roomId', 'roomCode', 'roomName', 'hostId', 'privacy', 'gameMode', 'maxPlayers', 'playerCount', 'status', 'customRules', 'createdAt', 'updatedAt'])
+        && data.roomId == roomId
+        && isValidId(data.roomId)
+        && isValidRoomCode(data.roomCode)
+        && data.roomName is string && data.roomName.size() >= 2 && data.roomName.size() <= 40
+        && isValidId(data.hostId)
+        && data.privacy == 'private'
+        && data.gameMode in ['classic', 'flip', 'custom']
+        && data.maxPlayers is int && data.maxPlayers >= 2 && data.maxPlayers <= 10
+        && data.playerCount is int && data.playerCount >= 0 && data.playerCount <= 10
+        && data.status in ['waiting', 'lobby', 'playing', 'finished', 'closed']
+        && data.customRules is map
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidRoomPlayer(data, roomId, playerId) {
+      return data.keys().hasAll(['playerId', 'roomId', 'username', 'avatar', 'isHost', 'isReady', 'cardCount', 'connectionStatus', 'joinedAt', 'lastSeen'])
+        && data.keys().hasOnly(['playerId', 'roomId', 'username', 'avatar', 'isHost', 'isReady', 'cardCount', 'connectionStatus', 'joinedAt', 'lastSeen'])
+        && data.playerId == playerId
+        && isValidId(data.playerId)
+        && data.roomId == roomId
+        && isValidId(data.roomId)
+        && data.username is string && data.username.size() >= 2 && data.username.size() <= 24
+        && data.avatar is string && data.avatar.size() >= 1 && data.avatar.size() <= 128
+        && data.isHost is bool
+        && data.isReady is bool
+        && data.cardCount is int && data.cardCount >= 0 && data.cardCount <= 112
+        && data.connectionStatus in ['online', 'reconnecting', 'offline']
+        && data.joinedAt is timestamp
+        && data.lastSeen is timestamp;
+    }
+
+    function isValidGameActivity(data, activityId) {
+      return data.keys().hasAll(['activityId', 'playerId', 'message', 'timestamp'])
+        && data.keys().hasOnly(['activityId', 'playerId', 'message', 'timestamp'])
+        && data.activityId == activityId
+        && isValidId(data.activityId)
+        && isValidId(data.playerId)
+        && data.message is string && data.message.size() >= 1 && data.message.size() <= 200
+        && data.timestamp == request.time;
+    }
+
+    // 4. Collection Rules
+    match /users/{userId} {
+      allow get: if isValidId(userId) && isOwner(userId);
+      allow list: if false;
+      allow create: if isValidId(userId)
+        && isOwner(userId)
+        && isValidUserProfile(incoming(), userId)
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time;
+      allow update: if isValidId(userId)
+        && isOwner(userId)
+        && isValidUserProfile(incoming(), userId)
+        && incoming().uid == existing().uid
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && incoming().diff(existing()).affectedKeys().hasOnly(['username', 'avatar', 'gamesPlayed', 'wins', 'updatedAt']);
+      allow delete: if false;
+
+      match /private/{docId} {
+        allow get: if isValidId(userId) && isValidId(docId) && isOwner(userId);
+        allow list: if false;
+        allow create: if isValidId(userId)
+          && docId == 'info'
+          && isOwner(userId)
+          && isValidUserPrivateInfo(incoming(), userId)
+          && incoming().updatedAt == request.time;
+        allow update: if isValidId(userId)
+          && docId == 'info'
+          && isOwner(userId)
+          && isValidUserPrivateInfo(incoming(), userId)
+          && incoming().uid == existing().uid
+          && incoming().updatedAt == request.time
+          && incoming().diff(existing()).affectedKeys().hasOnly(['email', 'providerId', 'updatedAt']);
+        allow delete: if false;
+      }
+    }
+
+    match /roomCodes/{roomCode} {
+      allow get: if isValidRoomCode(roomCode) && isSignedIn();
+      allow list: if false;
+      allow create: if isValidRoomCode(roomCode)
+        && isSignedIn()
+        && isValidRoomCodeLookup(incoming(), roomCode)
+        && (exists(/databases/$(database)/documents/rooms/$(incoming().roomId))
+          || existsAfter(/databases/$(database)/documents/rooms/$(incoming().roomId)));
+      allow update: if false;
+      allow delete: if isValidRoomCode(roomCode)
+        && isSignedIn()
+        && existing().hostId == request.auth.uid;
+    }
+
+    match /rooms/{roomId} {
+      allow get: if isValidId(roomId) && isSignedIn() && (existing().hostId == request.auth.uid || isRoomMember(roomId));
+      allow list: if isSignedIn() && resource.data.hostId == request.auth.uid;
+
+      allow create: if isValidId(roomId)
+        && isSignedIn()
+        && isValidRoom(incoming(), roomId)
+        && incoming().hostId == request.auth.uid
+        && incoming().status in ['waiting', 'lobby']
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time;
+
+      allow update: if isValidId(roomId)
+        && isSignedIn()
+        && isValidRoom(incoming(), roomId)
+        && existing().status != 'closed'
+        && incoming().roomId == existing().roomId
+        && incoming().roomCode == existing().roomCode
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && (
+          (existing().hostId == request.auth.uid
+            && incoming().diff(existing()).affectedKeys().hasOnly(['roomName', 'gameMode', 'maxPlayers', 'customRules', 'status', 'playerCount', 'hostId', 'updatedAt']))
+          ||
+          ((isRoomMember(roomId) || existsAfter(/databases/$(database)/documents/rooms/$(roomId)/players/$(request.auth.uid)))
+            && incoming().hostId == existing().hostId
+            && incoming().diff(existing()).affectedKeys().hasOnly(['playerCount', 'updatedAt']))
+        );
+
+      allow delete: if isValidId(roomId) && isSignedIn() && existing().hostId == request.auth.uid;
+
+      match /players/{playerId} {
+        allow get: if isValidId(roomId) && isValidId(playerId) && (isRoomMember(roomId) || isRoomHost(roomId));
+        allow list: if isRoomMember(roomId) || isRoomHost(roomId);
+
+        allow create: if isValidId(roomId)
+          && isValidId(playerId)
+          && isOwner(playerId)
+          && isValidRoomPlayer(incoming(), roomId, playerId)
+          && incoming().joinedAt == request.time
+          && incoming().lastSeen == request.time
+          && (exists(/databases/$(database)/documents/rooms/$(roomId))
+            || existsAfter(/databases/$(database)/documents/rooms/$(roomId)))
+          && getAfter(/databases/$(database)/documents/rooms/$(roomId)).data.status != 'closed';
+
+        allow update: if isValidId(roomId)
+          && isValidId(playerId)
+          && isValidRoomPlayer(incoming(), roomId, playerId)
+          && incoming().playerId == existing().playerId
+          && incoming().roomId == existing().roomId
+          && incoming().joinedAt == existing().joinedAt
+          && incoming().lastSeen == request.time
+          && (
+            (isOwner(playerId)
+              && incoming().isHost == existing().isHost
+              && incoming().diff(existing()).affectedKeys().hasOnly(['username', 'avatar', 'isReady', 'connectionStatus', 'lastSeen']))
+            ||
+            (isRoomHost(roomId)
+              && incoming().diff(existing()).affectedKeys().hasOnly(['isHost', 'connectionStatus', 'lastSeen']))
+          );
+
+        allow delete: if isValidId(roomId) && isValidId(playerId) && (isOwner(playerId) || isRoomHost(roomId));
+      }
+
+      match /game/state {
+        allow get: if isValidId(roomId) && isRoomMember(roomId);
+        allow list: if false;
+        allow write: if false;
+      }
+
+      match /game/hands/{playerId} {
+        allow get: if isValidId(roomId) && isValidId(playerId) && isOwner(playerId) && isRoomMember(roomId);
+        allow list: if false;
+        allow write: if false;
+      }
+
+      match /game/secret/{docId} {
+        allow read, write: if false;
+      }
+
+      match /game/actions/{actionId} {
+        allow get: if isValidId(roomId) && isValidId(actionId) && isRoomMember(roomId);
+        allow list: if isRoomMember(roomId);
+        allow write: if false;
+      }
+
+      match /game/activity/{activityId} {
+        allow get: if isValidId(roomId) && isValidId(activityId) && isRoomMember(roomId);
+        allow list: if isRoomMember(roomId);
+        allow create: if isValidId(roomId)
+          && isValidId(activityId)
+          && isRoomMember(roomId)
+          && isValidGameActivity(incoming(), activityId)
+          && incoming().playerId == request.auth.uid;
+        allow update, delete: if false;
+      }
+    }
+  }
+}
