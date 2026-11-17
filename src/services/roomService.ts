@@ -298,6 +298,9 @@ export async function createPrivateRoom(
               roomCode: candidateCode,
               roomId,
               hostId: uid,
+              roomName: cleanRoomName,
+              gameMode,
+              maxPlayers: clampedMaxPlayers,
               createdAt: serverTimestamp(),
             });
 
@@ -470,13 +473,22 @@ export async function lookupRoomByCode(
     const codeSnap = await getDoc(doc(db, 'roomCodes', clean));
     if (codeSnap.exists()) {
       const data = codeSnap.data();
+      const previewMode: GameMode = ['classic', 'flip', 'custom'].includes(String(data.gameMode))
+        ? (data.gameMode as GameMode)
+        : 'classic';
       return {
         roomId: String(data.roomId),
         roomCode: clean,
-        roomName: 'Private UNO Room',
-        gameMode: 'classic',
+        roomName:
+          typeof data.roomName === 'string' && data.roomName.trim()
+            ? data.roomName
+            : 'Private UNO Room',
+        gameMode: previewMode,
         playerCount: 1,
-        maxPlayers: 10,
+        maxPlayers:
+          typeof data.maxPlayers === 'number'
+            ? Math.min(10, Math.max(2, data.maxPlayers))
+            : 10,
         status: 'waiting',
         allowLateJoining: false,
         allowSpectators: false,
@@ -566,12 +578,15 @@ export async function joinRoom(
 
   const clean = roomIdOrCode.trim();
   let targetRoomId = clean;
+  let codeHostId: string | null = null;
   if (/^[A-Za-z0-9]{6}$/.test(clean)) {
     const codeSnap = await getDoc(doc(db, 'roomCodes', clean.toUpperCase()));
     if (!codeSnap.exists()) {
       throw new Error('Private room not found. Check your 6-character code.');
     }
-    targetRoomId = String(codeSnap.data().roomId);
+    const codeData = codeSnap.data();
+    targetRoomId = String(codeData.roomId);
+    codeHostId = typeof codeData.hostId === 'string' ? codeData.hostId : null;
   }
 
   try {
@@ -580,13 +595,14 @@ export async function joinRoom(
     await runTransaction(db, async (tx) => {
       const pSnap = await tx.get(playerRef);
       if (!pSnap.exists()) {
+        const isHost = Boolean(codeHostId && codeHostId === firebaseUser.uid);
         tx.set(playerRef, {
           playerId: firebaseUser.uid,
           roomId: targetRoomId,
           username: safeUsername,
           avatar: safeAvatar,
-          isHost: false,
-          isReady: false,
+          isHost,
+          isReady: isHost,
           cardCount: 0,
           connectionStatus: 'online',
           joinedAt: serverTimestamp(),
@@ -627,7 +643,13 @@ export async function joinRoom(
 
     return { room, gameState: null, hand: [] };
   } catch (err) {
-    throw mapFirebaseRoomError(err, `rooms/${targetRoomId}/players/${firebaseUser.uid}`);
+    const mapped = mapFirebaseRoomError(err, `rooms/${targetRoomId}/players/${firebaseUser.uid}`);
+    if (mapped.message.includes('Database permission denied')) {
+      throw new Error(
+        'Database permission denied while joining this private room. Verify you are signed in and that the room is still waiting with open seats.'
+      );
+    }
+    throw mapped;
   }
 }
 
@@ -794,9 +816,13 @@ export async function updatePlayerLobbyState(
     if (typeof updates.isReady === 'boolean') {
       fsUpdates.isReady = updates.isReady;
     }
-    await updateDoc(doc(db, 'rooms', roomId, 'players', firebaseUser.uid), fsUpdates).catch(
-      () => {}
-    );
+    try {
+      await updateDoc(doc(db, 'rooms', roomId, 'players', firebaseUser.uid), fsUpdates);
+    } catch (err) {
+      if (!sessionToken) {
+        throw mapFirebaseRoomError(err, `rooms/${roomId}/players/${firebaseUser.uid}`);
+      }
+    }
   }
 
   if (sessionToken) {
@@ -843,7 +869,13 @@ export async function updateRoomSettings(
     if (settings.customRules) {
       fsUpdates.customRules = settings.customRules;
     }
-    await updateDoc(doc(db, 'rooms', roomId), fsUpdates).catch(() => {});
+    try {
+      await updateDoc(doc(db, 'rooms', roomId), fsUpdates);
+    } catch (err) {
+      if (!sessionToken) {
+        throw mapFirebaseRoomError(err, `rooms/${roomId}`);
+      }
+    }
   }
 
   if (sessionToken) {
@@ -871,7 +903,21 @@ export async function kickPlayerFromRoom(
   playerId: string
 ): Promise<{ room: RoomData }> {
   if (auth.currentUser) {
-    await deleteDoc(doc(db, 'rooms', roomId, 'players', playerId)).catch(() => {});
+    const roomRef = doc(db, 'rooms', roomId);
+    const targetRef = doc(db, 'rooms', roomId, 'players', playerId);
+    await runTransaction(db, async (tx) => {
+      const targetSnap = await tx.get(targetRef);
+      const roomSnap = await tx.get(roomRef);
+      if (targetSnap.exists()) {
+        tx.delete(targetRef);
+        if (roomSnap.exists() && Number(roomSnap.data().playerCount || 0) > 0) {
+          tx.update(roomRef, {
+            playerCount: increment(-1),
+            updatedAt: serverTimestamp(),
+          });
+        }
+      }
+    }).catch(() => {});
   }
   if (sessionToken) {
     try {
@@ -892,8 +938,64 @@ export async function kickPlayerFromRoom(
 }
 
 export async function leaveRoom(sessionToken: string, roomId: string): Promise<void> {
-  if (auth.currentUser) {
-    await deleteDoc(doc(db, 'rooms', roomId, 'players', auth.currentUser.uid)).catch(() => {});
+  const firebaseUser = auth.currentUser;
+  if (firebaseUser) {
+    const uid = firebaseUser.uid;
+    try {
+      const playersSnap = await getDocs(
+        query(collection(db, 'rooms', roomId, 'players'), orderBy('joinedAt', 'asc'))
+      );
+      const nextHostId = playersSnap.docs.find((d) => d.id !== uid)?.id || null;
+      const roomRef = doc(db, 'rooms', roomId);
+      const playerRef = doc(db, 'rooms', roomId, 'players', uid);
+
+      await runTransaction(db, async (tx) => {
+        const roomSnap = await tx.get(roomRef);
+        const playerSnap = await tx.get(playerRef);
+        if (!roomSnap.exists() || !playerSnap.exists()) return;
+
+        const roomData = roomSnap.data();
+        if (roomData.status === 'closed') return;
+
+        const currentCount = Number(roomData.playerCount || 1);
+        tx.delete(playerRef);
+
+        if (currentCount <= 1) {
+          if (roomData.hostId === uid) {
+            tx.update(roomRef, {
+              status: 'closed',
+              playerCount: 0,
+              updatedAt: serverTimestamp(),
+            });
+          } else {
+            tx.update(roomRef, {
+              playerCount: increment(-1),
+              updatedAt: serverTimestamp(),
+            });
+          }
+          return;
+        }
+
+        if (roomData.hostId === uid && nextHostId) {
+          tx.update(doc(db, 'rooms', roomId, 'players', nextHostId), {
+            isHost: true,
+            lastSeen: serverTimestamp(),
+          });
+          tx.update(roomRef, {
+            hostId: nextHostId,
+            playerCount: increment(-1),
+            updatedAt: serverTimestamp(),
+          });
+        } else {
+          tx.update(roomRef, {
+            playerCount: increment(-1),
+            updatedAt: serverTimestamp(),
+          });
+        }
+      });
+    } catch {
+      await deleteDoc(doc(db, 'rooms', roomId, 'players', uid)).catch(() => {});
+    }
   }
   if (sessionToken) {
     await apiRequest(`/api/rooms/${encodeURIComponent(roomId)}/leave`, sessionToken, {

@@ -47,9 +47,20 @@ vi.mock('firebase/firestore', () => {
   const query = (colRef: { path: string }) => colRef;
   const orderBy = () => ({});
   const increment = (n: number) => ({ __inc: n });
+  const applyMerge = (existing: Record<string, unknown>, updates: Record<string, unknown>) => {
+    const next: Record<string, unknown> = { ...existing };
+    for (const [k, v] of Object.entries(updates)) {
+      if (v && typeof v === 'object' && '__inc' in v) {
+        next[k] = Number(existing[k] || 0) + Number((v as { __inc: number }).__inc);
+      } else {
+        next[k] = v;
+      }
+    }
+    return next;
+  };
   const updateDoc = async (ref: { path: string }, updates: Record<string, unknown>) => {
     const existing = mockFirestoreStore.get(ref.path) || {};
-    mockFirestoreStore.set(ref.path, { ...existing, ...updates });
+    mockFirestoreStore.set(ref.path, applyMerge(existing, updates));
   };
   const deleteDoc = async (ref: { path: string }) => {
     mockFirestoreStore.delete(ref.path);
@@ -60,6 +71,7 @@ vi.mock('firebase/firestore', () => {
       get: typeof getDoc;
       set: (ref: { path: string }, data: Record<string, unknown>) => void;
       update: typeof updateDoc;
+      delete: typeof deleteDoc;
     }) => Promise<void>
   ) => {
     if (forceNextTransactionError) {
@@ -67,7 +79,7 @@ vi.mock('firebase/firestore', () => {
       forceNextTransactionError = null;
       throw err;
     }
-    const pending = new Map<string, Record<string, unknown>>();
+    const pending = new Map<string, Record<string, unknown> | null>();
     const tx = {
       get: getDoc,
       set: (ref: { path: string }, data: Record<string, unknown>) => {
@@ -75,12 +87,19 @@ vi.mock('firebase/firestore', () => {
       },
       update: async (ref: { path: string }, updates: Record<string, unknown>) => {
         const existing = mockFirestoreStore.get(ref.path) || {};
-        pending.set(ref.path, { ...existing, ...updates });
+        pending.set(ref.path, applyMerge(existing, updates));
+      },
+      delete: async (ref: { path: string }) => {
+        pending.set(ref.path, null);
       },
     };
     await fn(tx);
     for (const [k, v] of pending.entries()) {
-      mockFirestoreStore.set(k, v);
+      if (v === null) {
+        mockFirestoreStore.delete(k);
+      } else {
+        mockFirestoreStore.set(k, v);
+      }
     }
   };
 
@@ -117,10 +136,17 @@ vi.mock('../firebase', () => ({
   },
 }));
 
-import { createPrivateRoom, fetchRoomState } from '../roomService';
+import {
+  createPrivateRoom,
+  fetchRoomState,
+  joinRoom,
+  leaveRoom,
+  lookupRoomByCode,
+  updatePlayerLobbyState,
+} from '../roomService';
 import { DEFAULT_CUSTOM_RULES } from '../../engine/gameTypes';
 
-describe('roomService private room creation & Firestore integration', () => {
+describe('roomService private room creation, joining & Firestore integration', () => {
   beforeEach(() => {
     mockFirestoreStore.clear();
     mockCurrentUser = { uid: 'host_user_123', isAnonymous: true };
@@ -200,6 +226,62 @@ describe('roomService private room creation & Firestore integration', () => {
     expect(res.gameMode).toBe('custom');
     expect(res.maxPlayers).toBe(10);
     expect(res.status).toBe('waiting');
+  });
+
+  it('allows Player B and Player C to look up and join a private room via Firestore without Express sessionToken, preserving host and updating playerCount', async () => {
+    // TEST A: Player A creates Classic UNO room
+    const created = await createPrivateRoom('', {
+      roomName: 'Friday Night UNO',
+      gameMode: 'classic',
+      maxPlayers: 10,
+      customRules: DEFAULT_CUSTOM_RULES,
+      username: 'PlayerA',
+      avatar: 'crimson',
+    });
+
+    // TEST B & C: Player B signs in as Firebase anonymous guest & looks up code
+    mockCurrentUser = { uid: 'guest_player_B', isAnonymous: true };
+    const preview = await lookupRoomByCode('', created.roomCode);
+    expect(preview.roomId).toBe(created.roomId);
+    expect(preview.roomCode).toBe(created.roomCode);
+    expect(preview.roomName).toBe('Friday Night UNO');
+    expect(preview.gameMode).toBe('classic');
+    expect(preview.maxPlayers).toBe(10);
+
+    // TEST D, E, F: Player B joins atomically
+    const joinedB = await joinRoom('', created.roomCode, {
+      username: 'PlayerB',
+      avatar: 'cobalt',
+    });
+    expect(joinedB.room.roomId).toBe(created.roomId);
+    expect(joinedB.room.hostId).toBe('host_user_123');
+    expect(joinedB.room.players).toHaveLength(2);
+    expect(joinedB.room.players.find((p) => p.id === 'host_user_123')?.isHost).toBe(true);
+    expect(joinedB.room.players.find((p) => p.id === 'guest_player_B')?.isHost).toBe(false);
+    expect(joinedB.room.players.find((p) => p.id === 'guest_player_B')?.isReady).toBe(false);
+
+    expect(mockFirestoreStore.get(`rooms/${created.roomId}`)?.playerCount).toBe(2);
+
+    // Player B toggles ready
+    const afterReady = await updatePlayerLobbyState('', created.roomId, { isReady: true });
+    expect(afterReady.room.players.find((p) => p.id === 'guest_player_B')?.isReady).toBe(true);
+
+    // TEST G: Player C joins the same room
+    mockCurrentUser = { uid: 'guest_player_C', isAnonymous: true };
+    const joinedC = await joinRoom('', created.roomCode, {
+      username: 'PlayerC',
+      avatar: 'emerald',
+    });
+    expect(joinedC.room.players).toHaveLength(3);
+    expect(mockFirestoreStore.get(`rooms/${created.roomId}`)?.playerCount).toBe(3);
+
+    // Player C leaves cleanly and decrements playerCount
+    await leaveRoom('', created.roomId);
+    expect(mockFirestoreStore.get(`rooms/${created.roomId}`)?.playerCount).toBe(2);
+
+    // TEST H: Unauthorized user D cannot hydrate room state directly
+    mockCurrentUser = { uid: 'intruder_user_D', isAnonymous: true };
+    await expect(fetchRoomState('', created.roomId)).rejects.toThrow(/not a member/i);
   });
 
   it('loads room data from Firestore on lobby refresh when server returns 404', async () => {

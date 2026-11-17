@@ -37,4 +37,24 @@ describe('UNO ARENA Firestore Security Rules Static & Policy Audit', () => {
     expect(rules).toContain('request.time');
     expect(rules).toContain("data.privacy == 'private'");
   });
+
+  it('allows owner-only pre-join player doc check while locking room and player list to members', () => {
+    expect(rules).toMatch(
+      /match \/rooms\/\{roomId\}[\s\S]*allow get: if isValidId\(roomId\) && isSignedIn\(\) && \(existing\(\)\.hostId == request\.auth\.uid \|\| isRoomMember\(roomId\)\);/
+    );
+    expect(rules).toMatch(
+      /match \/players\/\{playerId\}[\s\S]*allow get: if isValidId\(roomId\) && isValidId\(playerId\) && \(isOwner\(playerId\) \|\| isRoomMember\(roomId\) \|\| isRoomHost\(roomId\)\);/
+    );
+    expect(rules).toMatch(
+      /match \/players\/\{playerId\}[\s\S]*allow list: if isRoomMember\(roomId\) \|\| isRoomHost\(roomId\);/
+    );
+  });
+
+  it('enforces waiting status, room capacity, non-spoofable isHost, and atomic playerCount increment on join', () => {
+    expect(rules).toContain('data.playerCount <= data.maxPlayers');
+    expect(rules).toContain("get(/databases/$(database)/documents/rooms/$(roomId)).data.playerCount < get(/databases/$(database)/documents/rooms/$(roomId)).data.maxPlayers");
+    expect(rules).toContain('incoming().isHost == (get(/databases/$(database)/documents/rooms/$(roomId)).data.hostId == playerId)');
+    expect(rules).toContain('incoming().playerCount == existing().playerCount + 1');
+    expect(rules).toContain('incoming().playerCount <= existing().maxPlayers');
+  });
 });

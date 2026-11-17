@@ -274,17 +274,21 @@ export function GameProvider({ children }: { children: React.ReactNode }) {
   );
 
   const leaveCurrentRoom = useCallback(async () => {
-    if (user && room) {
-      await leaveRoom(user.sessionToken, room.roomId).catch(() => {});
-    }
+    const token = user?.sessionToken ?? '';
+    const targetRoomId = room?.roomId;
     clearRoom();
+    if (user && targetRoomId) {
+      await leaveRoom(token, targetRoomId).catch(() => {});
+    }
   }, [user, room, clearRoom]);
 
   const closeCurrentRoom = useCallback(async () => {
-    if (user && room) {
-      await closeRoom(user.sessionToken, room.roomId).catch(() => {});
-    }
+    const token = user?.sessionToken ?? '';
+    const targetRoomId = room?.roomId;
     clearRoom();
+    if (user && targetRoomId) {
+      await closeRoom(token, targetRoomId).catch(() => {});
+    }
   }, [user, room, clearRoom]);
 
   const startGame = useCallback(async () => {

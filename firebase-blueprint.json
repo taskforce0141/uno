@@ -66,7 +66,7 @@
     },
     "RoomCodeLookup": {
       "title": "RoomCodeLookup",
-      "description": "Single-code lookup mapping a 6-character private room code to its roomId.",
+      "description": "Single-code lookup mapping a 6-character private room code to its roomId and safe preview metadata.",
       "type": "object",
       "properties": {
         "roomCode": {
@@ -84,6 +84,18 @@
           "type": "string",
           "maxLength": 128,
           "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "roomName": {
+          "type": "string",
+          "minLength": 2,
+          "maxLength": 40
+        },
+        "gameMode": {
+          "type": "string",
+          "enum": ["classic", "flip", "custom"]
+        },
+        "maxPlayers": {
+          "type": "number"
         },
         "createdAt": {
           "type": "string",
