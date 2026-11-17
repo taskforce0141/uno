@@ -1,6 +1,10 @@
 import React, { createContext, useCallback, useEffect, useRef, useState } from 'react';
 import { CardColor, PublicGameState, RoomData, UnoCard } from '../engine/gameTypes';
-import { createGameWebSocket, SocketMessage } from '../services/gameService';
+import {
+  createGameWebSocket,
+  SocketMessage,
+  submitFirebaseGameAction,
+} from '../services/gameService';
 import {
   closeRoom,
   fetchRoomState,
@@ -10,6 +14,7 @@ import {
   returnRoomToLobby,
   startNextRound,
   startRoomGame,
+  subscribeToGameFirestore,
   subscribeToRoomFirestore,
   updatePlayerLobbyState,
   updateRoomSettings,
@@ -67,6 +72,7 @@ export function GameProvider({ children }: { children: React.ReactNode }) {
   const [toasts, setToasts] = useState<ToastItem[]>([]);
 
   const socketRef = useRef<ReturnType<typeof createGameWebSocket> | null>(null);
+  const unsubFirestoreRef = useRef<(() => void) | null>(null);
   const prevSeqRef = useRef<number>(0);
   const prevSideRef = useRef<string>('light');
   const prevStatusRef = useRef<string>('');
@@ -86,6 +92,8 @@ export function GameProvider({ children }: { children: React.ReactNode }) {
   const clearRoom = useCallback(() => {
     socketRef.current?.close();
     socketRef.current = null;
+    unsubFirestoreRef.current?.();
+    unsubFirestoreRef.current = null;
     setRoom(null);
     setGameState(null);
     setHand([]);
@@ -100,33 +108,41 @@ export function GameProvider({ children }: { children: React.ReactNode }) {
     }
   }, []);
 
+  const applyGameSyncEffects = useCallback((nextGame: PublicGameState | null) => {
+    if (!nextGame) {
+      prevSeqRef.current = 0;
+      prevSideRef.current = 'light';
+      prevStatusRef.current = '';
+      return;
+    }
+
+    if (nextGame.currentSide !== prevSideRef.current) {
+      soundFx.flipSide();
+      prevSideRef.current = nextGame.currentSide;
+    } else if (
+      (nextGame.gameStatus === 'finished' || nextGame.gameStatus === 'round_over') &&
+      prevStatusRef.current === 'playing'
+    ) {
+      soundFx.win();
+    } else if (nextGame.actionSeq > prevSeqRef.current) {
+      const topMsg = (nextGame.lastAction || '').toLowerCase();
+      if (topMsg.includes('uno!')) soundFx.unoCall();
+      else if (topMsg.includes('skip')) soundFx.skip();
+      else if (topMsg.includes('reverse')) soundFx.reverse();
+      else if (topMsg.includes('drew') || topMsg.includes('draw')) soundFx.drawCard();
+      else soundFx.playCard();
+    }
+    prevSeqRef.current = nextGame.actionSeq;
+    prevStatusRef.current = nextGame.gameStatus;
+  }, []);
+
   const handleSocketMessage = useCallback(
     (msg: SocketMessage) => {
       if (msg.type === 'state_sync') {
         setRoom(msg.room);
         setGameState(msg.gameState);
         setHand(msg.hand);
-
-        if (msg.gameState) {
-          if (msg.gameState.currentSide !== prevSideRef.current) {
-            soundFx.flipSide();
-            prevSideRef.current = msg.gameState.currentSide;
-          } else if (
-            (msg.gameState.gameStatus === 'finished' || msg.gameState.gameStatus === 'round_over') &&
-            prevStatusRef.current === 'playing'
-          ) {
-            soundFx.win();
-          } else if (msg.gameState.actionSeq > prevSeqRef.current) {
-            const topMsg = msg.gameState.lastAction.toLowerCase();
-            if (topMsg.includes('uno!')) soundFx.unoCall();
-            else if (topMsg.includes('skip')) soundFx.skip();
-            else if (topMsg.includes('reverse')) soundFx.reverse();
-            else if (topMsg.includes('drew') || topMsg.includes('draw')) soundFx.drawCard();
-            else soundFx.playCard();
-          }
-          prevSeqRef.current = msg.gameState.actionSeq;
-          prevStatusRef.current = msg.gameState.gameStatus;
-        }
+        applyGameSyncEffects(msg.gameState);
       } else if (msg.type === 'error') {
         addToast(msg.message, 'error');
       } else if (msg.type === 'kicked' || msg.type === 'room_closed') {
@@ -134,16 +150,19 @@ export function GameProvider({ children }: { children: React.ReactNode }) {
         clearRoom();
       }
     },
-    [addToast, clearRoom]
+    [addToast, clearRoom, applyGameSyncEffects]
   );
 
   const activeRoomId = room?.roomId;
   const sessionToken = user?.sessionToken;
+  const firebaseUid = user?.uid;
 
   useEffect(() => {
     if (!activeRoomId) {
       socketRef.current?.close();
       socketRef.current = null;
+      unsubFirestoreRef.current?.();
+      unsubFirestoreRef.current = null;
       return;
     }
 
@@ -151,7 +170,8 @@ export function GameProvider({ children }: { children: React.ReactNode }) {
       socketRef.current?.close();
       socketRef.current = null;
       setConnectionStatus('connected');
-      const unsubFirestore = subscribeToRoomFirestore(
+
+      const unsubRoom = subscribeToRoomFirestore(
         activeRoomId,
         (nextRoom) => {
           setRoom((prev) =>
@@ -165,11 +185,37 @@ export function GameProvider({ children }: { children: React.ReactNode }) {
           clearRoom();
         }
       );
+
+      const unsubGame = firebaseUid
+        ? subscribeToGameFirestore(
+            activeRoomId,
+            firebaseUid,
+            (nextGame) => {
+              setGameState(nextGame);
+              applyGameSyncEffects(nextGame);
+            },
+            (nextHand) => {
+              setHand(nextHand);
+            }
+          )
+        : () => {};
+
+      const combinedUnsub = () => {
+        unsubRoom();
+        unsubGame();
+      };
+      unsubFirestoreRef.current = combinedUnsub;
+
       return () => {
-        unsubFirestore();
+        combinedUnsub();
+        if (unsubFirestoreRef.current === combinedUnsub) {
+          unsubFirestoreRef.current = null;
+        }
       };
     }
 
+    unsubFirestoreRef.current?.();
+    unsubFirestoreRef.current = null;
     socketRef.current?.close();
     socketRef.current = createGameWebSocket(
       activeRoomId,
@@ -182,7 +228,15 @@ export function GameProvider({ children }: { children: React.ReactNode }) {
       socketRef.current?.close();
       socketRef.current = null;
     };
-  }, [activeRoomId, sessionToken, handleSocketMessage, addToast, clearRoom]);
+  }, [
+    activeRoomId,
+    sessionToken,
+    firebaseUid,
+    handleSocketMessage,
+    applyGameSyncEffects,
+    addToast,
+    clearRoom,
+  ]);
 
   const attachRoom = useCallback(
     (nextRoom: RoomData, nextGame: PublicGameState | null = null, nextHand: UnoCard[] = []) => {
@@ -218,9 +272,28 @@ export function GameProvider({ children }: { children: React.ReactNode }) {
     [user, attachRoom]
   );
 
-  const sendGameAction = useCallback((actionType: string, payload: Record<string, unknown> = {}) => {
-    socketRef.current?.sendAction(actionType, payload);
-  }, []);
+  const sendGameAction = useCallback(
+    (actionType: string, payload: Record<string, unknown> = {}) => {
+      if (socketRef.current) {
+        socketRef.current.sendAction(actionType, payload);
+        return;
+      }
+      if (!activeRoomId || !user) return;
+
+      submitFirebaseGameAction(activeRoomId, actionType, payload)
+        .then((res) => {
+          if (res.room) setRoom(res.room);
+          setGameState(res.gameState);
+          setHand(res.hand);
+          applyGameSyncEffects(res.gameState);
+        })
+        .catch((err) => {
+          if (actionType === 'timeout') return;
+          addToast(err instanceof Error ? err.message : 'Game action failed.', 'error');
+        });
+    },
+    [activeRoomId, user, applyGameSyncEffects, addToast]
+  );
 
   const playCards = useCallback(
     (cardIds: string[], chosenColor?: CardColor) => {
@@ -297,17 +370,30 @@ export function GameProvider({ children }: { children: React.ReactNode }) {
     setRoom(res.room);
     setGameState(res.gameState);
     setHand(res.hand);
-  }, [user, room]);
+    applyGameSyncEffects(res.gameState);
+  }, [user, room, applyGameSyncEffects]);
 
   const nextRound = useCallback(async () => {
     if (!user || !room) return;
-    await startNextRound(user.sessionToken, room.roomId);
-  }, [user, room]);
+    const res = await startNextRound(user.sessionToken, room.roomId);
+    if (res && 'room' in res) {
+      setRoom(res.room);
+      setGameState(res.gameState);
+      setHand(res.hand);
+      applyGameSyncEffects(res.gameState);
+    }
+  }, [user, room, applyGameSyncEffects]);
 
   const playAgain = useCallback(async () => {
     if (!user || !room) return;
-    await restartRoomGame(user.sessionToken, room.roomId);
-  }, [user, room]);
+    const res = await restartRoomGame(user.sessionToken, room.roomId);
+    if (res && 'room' in res) {
+      setRoom(res.room);
+      setGameState(res.gameState);
+      setHand(res.hand);
+      applyGameSyncEffects(res.gameState);
+    }
+  }, [user, room, applyGameSyncEffects]);
 
   const backToLobby = useCallback(async () => {
     if (!user || !room) return;
@@ -315,7 +401,8 @@ export function GameProvider({ children }: { children: React.ReactNode }) {
     setRoom(res.room);
     setGameState(null);
     setHand([]);
-  }, [user, room]);
+    applyGameSyncEffects(null);
+  }, [user, room, applyGameSyncEffects]);
 
   return (
     <GameContext.Provider

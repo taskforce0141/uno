@@ -273,23 +273,23 @@ service cloud.firestore {
         allow write: if false;
       }
 
-      match /game/hands/{playerId} {
+      match /hands/{playerId} {
         allow get: if isValidId(roomId) && isValidId(playerId) && isOwner(playerId) && isRoomMember(roomId);
         allow list: if false;
         allow write: if false;
       }
 
-      match /game/secret/{docId} {
+      match /secret/{docId} {
         allow read, write: if false;
       }
 
-      match /game/actions/{actionId} {
+      match /actions/{actionId} {
         allow get: if isValidId(roomId) && isValidId(actionId) && isRoomMember(roomId);
         allow list: if isRoomMember(roomId);
         allow write: if false;
       }
 
-      match /game/activity/{activityId} {
+      match /activity/{activityId} {
         allow get: if isValidId(roomId) && isValidId(activityId) && isRoomMember(roomId);
         allow list: if isRoomMember(roomId);
         allow create: if isValidId(roomId)

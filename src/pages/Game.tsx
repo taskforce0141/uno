@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   AlertTriangle,
   ArrowRight,
@@ -85,6 +85,7 @@ export function Game({ onLeave }: { onLeave: () => void }) {
     callUno,
     catchUno,
     passTurn,
+    sendGameAction,
     leaveCurrentRoom,
   } = useGame();
 
@@ -93,6 +94,7 @@ export function Game({ onLeave }: { onLeave: () => void }) {
   const [secondsLeft, setSecondsLeft] = useState<number | null>(null);
   const [mobileLogOpen, setMobileLogOpen] = useState(false);
   const [confirmLeave, setConfirmLeave] = useState(false);
+  const lastTimeoutSeqRef = useRef<number>(-1);
 
   useEffect(() => {
     setSelectedIds([]);
@@ -111,6 +113,22 @@ export function Game({ onLeave }: { onLeave: () => void }) {
     const timer = window.setInterval(update, 400);
     return () => window.clearInterval(timer);
   }, [gameState?.turnExpiresAt]);
+
+  useEffect(() => {
+    if (!gameState || !user || user.sessionToken) return;
+    if (gameState.gameStatus !== 'playing' || !gameState.turnExpiresAt) return;
+    if (secondsLeft === null || secondsLeft > 0) return;
+    if (lastTimeoutSeqRef.current === gameState.actionSeq) return;
+
+    const seq = gameState.actionSeq;
+    const timer = window.setTimeout(() => {
+      if (lastTimeoutSeqRef.current === seq) return;
+      lastTimeoutSeqRef.current = seq;
+      sendGameAction('timeout', { expectedSeq: seq });
+    }, 350);
+
+    return () => window.clearTimeout(timer);
+  }, [gameState, user, secondsLeft, sendGameAction]);
 
   const opponents = useMemo(() => {
     if (!gameState || !user) return [];

@@ -49,13 +49,13 @@ export const startGame = onCall(async (request) => {
       lastAction: 'Game started',
       updatedAt: now,
     });
-    tx.set(roomRef.collection('game').doc('secret'), {
+    tx.set(roomRef.collection('secret').doc('state'), {
       drawPile: deck,
       discardPile: [topCard],
       updatedAt: now,
     });
     for (const doc of playersSnap.docs) {
-      tx.set(roomRef.collection('game').doc('hands').collection('players').doc(doc.id), {
+      tx.set(roomRef.collection('hands').doc(doc.id), {
         playerId: doc.id,
         cards: hands[doc.id],
         updatedAt: now,
@@ -79,8 +79,8 @@ export const submitGameAction = onCall(async (request) => {
 
   const roomRef = db.collection('rooms').doc(roomId);
   const stateRef = roomRef.collection('game').doc('state');
-  const secretRef = roomRef.collection('game').doc('secret');
-  const actionRef = roomRef.collection('game').doc('actions').collection('log').doc(actionId);
+  const secretRef = roomRef.collection('secret').doc('state');
+  const actionRef = roomRef.collection('actions').doc(actionId);
 
   await db.runTransaction(async (tx) => {
     const existingAction = await tx.get(actionRef);
@@ -109,7 +109,7 @@ export const submitGameAction = onCall(async (request) => {
     const side = (state.currentSide || 'light') as 'light' | 'dark';
     const now = admin.firestore.FieldValue.serverTimestamp();
 
-    const handRef = roomRef.collection('game').doc('hands').collection('players').doc(uid);
+    const handRef = roomRef.collection('hands').doc(uid);
     const handSnap = await tx.get(handRef);
     const hand: UnoCard[] = [...(handSnap.data()?.cards || [])];
 

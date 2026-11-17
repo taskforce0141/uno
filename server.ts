@@ -30,6 +30,13 @@ import {
   swapHandsAction,
   toPublicGameState,
 } from './src/engine/gameEngine.ts';
+import gameStartHandler from './api/game/start.ts';
+import gamePlayCardHandler from './api/game/play-card.ts';
+import gameDrawCardHandler from './api/game/draw-card.ts';
+import gameCallUnoHandler from './api/game/call-uno.ts';
+import gameChallengeHandler from './api/game/challenge.ts';
+import gameLeaveHandler from './api/game/leave.ts';
+import gameActionHandler from './api/game/action.ts';
 
 const PORT = Number(process.env.PORT || 3000);
 const SESSION_SECRET = process.env.SESSION_SECRET || crypto.randomBytes(32).toString('hex');
@@ -808,6 +815,23 @@ async function startServer() {
       res.status(400).json({ error: err instanceof Error ? err.message : 'Invalid move.' });
     }
   });
+
+  // Authoritative Firebase/Firestore game API routes (mirrors Vercel serverless /api/game/* endpoints)
+  const mountGameEndpoint = (
+    routePath: string,
+    handler: (req: Request, res: Response) => Promise<void>
+  ) => {
+    app.post(routePath, (req: Request, res: Response) => {
+      void handler(req, res);
+    });
+  };
+  mountGameEndpoint('/api/game/start', gameStartHandler);
+  mountGameEndpoint('/api/game/play-card', gamePlayCardHandler);
+  mountGameEndpoint('/api/game/draw-card', gameDrawCardHandler);
+  mountGameEndpoint('/api/game/call-uno', gameCallUnoHandler);
+  mountGameEndpoint('/api/game/challenge', gameChallengeHandler);
+  mountGameEndpoint('/api/game/leave', gameLeaveHandler);
+  mountGameEndpoint('/api/game/action', gameActionHandler);
 
   // Vite or static serving
   const isProd = process.env.NODE_ENV === 'production';

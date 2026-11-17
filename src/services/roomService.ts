@@ -23,7 +23,8 @@ import {
 } from '../engine/gameTypes';
 import { resolveRulesForMode } from '../engine/customRules';
 import { auth, db, handleFirestoreError, OperationType } from './firebase';
-import { buildApiUrl, USE_CLOUD_FUNCTIONS } from './sessionService';
+import { firebaseGameApiRequest } from './gameService';
+import { buildApiUrl } from './sessionService';
 
 const ROOM_CODE_CHARS = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
 
@@ -695,7 +696,22 @@ export async function fetchRoomState(
     }).catch(() => {});
   }
 
-  return { room, gameState: null, hand: [] };
+  let gameState: PublicGameState | null = null;
+  let hand: UnoCard[] = [];
+  if (room.status === 'playing' || room.status === 'finished') {
+    const [stateSnap, handSnap] = await Promise.all([
+      getDoc(doc(db, 'rooms', roomId, 'game', 'state')),
+      uid ? getDoc(doc(db, 'rooms', roomId, 'hands', uid)) : Promise.resolve(null),
+    ]);
+    if (stateSnap.exists()) {
+      gameState = stateSnap.data() as PublicGameState;
+    }
+    if (handSnap && handSnap.exists()) {
+      hand = ((handSnap.data()?.cards as UnoCard[]) || []).slice();
+    }
+  }
+
+  return { room, gameState, hand };
 }
 
 export function subscribeToRoomFirestore(
@@ -796,6 +812,53 @@ export function subscribeToRoomFirestore(
   return () => {
     unsubRoom();
     unsubPlayers();
+  };
+}
+
+export function subscribeToGameFirestore(
+  roomId: string,
+  uid: string,
+  onGameUpdate: (gameState: PublicGameState | null) => void,
+  onHandUpdate: (hand: UnoCard[]) => void
+): () => void {
+  if (!auth.currentUser || !uid) return () => {};
+
+  const unsubState = onSnapshot(
+    doc(db, 'rooms', roomId, 'game', 'state'),
+    (snap) => {
+      if (!snap.exists()) {
+        onGameUpdate(null);
+        return;
+      }
+      onGameUpdate(snap.data() as PublicGameState);
+    },
+    (err) => {
+      if (err.message.includes('Missing or insufficient permissions')) {
+        handleFirestoreError(err, OperationType.GET, `rooms/${roomId}/game/state`);
+      }
+    }
+  );
+
+  const unsubHand = onSnapshot(
+    doc(db, 'rooms', roomId, 'hands', uid),
+    (snap) => {
+      if (!snap.exists()) {
+        onHandUpdate([]);
+        return;
+      }
+      const data = snap.data();
+      onHandUpdate(Array.isArray(data?.cards) ? (data.cards as UnoCard[]) : []);
+    },
+    (err) => {
+      if (err.message.includes('Missing or insufficient permissions')) {
+        handleFirestoreError(err, OperationType.GET, `rooms/${roomId}/hands/${uid}`);
+      }
+    }
+  );
+
+  return () => {
+    unsubState();
+    unsubHand();
   };
 }
 
@@ -939,6 +1002,19 @@ export async function kickPlayerFromRoom(
 
 export async function leaveRoom(sessionToken: string, roomId: string): Promise<void> {
   const firebaseUser = auth.currentUser;
+  if (!sessionToken && firebaseUser) {
+    try {
+      const roomSnap = await getDoc(doc(db, 'rooms', roomId));
+      const status = roomSnap.exists() ? String(roomSnap.data()?.status || '') : '';
+      if (status === 'playing' || status === 'finished') {
+        await firebaseGameApiRequest('/api/game/leave', { roomId });
+        return;
+      }
+    } catch {
+      // Fall back to direct Firestore lobby leave below if match leave endpoint is unavailable
+    }
+  }
+
   if (firebaseUser) {
     const uid = firebaseUser.uid;
     try {
@@ -1022,27 +1098,42 @@ export async function startRoomGame(
   sessionToken: string,
   roomId: string
 ): Promise<RoomStateResponse> {
-  if (!sessionToken && !USE_CLOUD_FUNCTIONS) {
-    throw new Error(
-      'Starting a live match requires a connected multiplayer server (VITE_API_BASE_URL) or deployed Cloud Functions (VITE_USE_CLOUD_FUNCTIONS=true).'
+  if (sessionToken) {
+    return apiRequest<RoomStateResponse>(
+      `/api/rooms/${encodeURIComponent(roomId)}/start`,
+      sessionToken,
+      { method: 'POST' }
     );
   }
-  return apiRequest<RoomStateResponse>(
-    `/api/rooms/${encodeURIComponent(roomId)}/start`,
-    sessionToken,
-    { method: 'POST' }
-  );
+  if (!auth.currentUser) {
+    throw new Error('Authentication required. Please sign in before starting a match.');
+  }
+  return firebaseGameApiRequest<RoomStateResponse>('/api/game/start', { roomId });
 }
 
-export async function startNextRound(sessionToken: string, roomId: string): Promise<void> {
-  await apiRequest(`/api/rooms/${encodeURIComponent(roomId)}/next-round`, sessionToken, {
-    method: 'POST',
+export async function startNextRound(sessionToken: string, roomId: string): Promise<RoomStateResponse | void> {
+  if (sessionToken) {
+    await apiRequest(`/api/rooms/${encodeURIComponent(roomId)}/next-round`, sessionToken, {
+      method: 'POST',
+    });
+    return;
+  }
+  return firebaseGameApiRequest<RoomStateResponse>('/api/game/action', {
+    roomId,
+    actionType: 'next_round',
   });
 }
 
-export async function restartRoomGame(sessionToken: string, roomId: string): Promise<void> {
-  await apiRequest(`/api/rooms/${encodeURIComponent(roomId)}/restart`, sessionToken, {
-    method: 'POST',
+export async function restartRoomGame(sessionToken: string, roomId: string): Promise<RoomStateResponse | void> {
+  if (sessionToken) {
+    await apiRequest(`/api/rooms/${encodeURIComponent(roomId)}/restart`, sessionToken, {
+      method: 'POST',
+    });
+    return;
+  }
+  return firebaseGameApiRequest<RoomStateResponse>('/api/game/action', {
+    roomId,
+    actionType: 'restart',
   });
 }
 
@@ -1050,9 +1141,15 @@ export async function returnRoomToLobby(
   sessionToken: string,
   roomId: string
 ): Promise<{ room: RoomData }> {
-  return apiRequest<{ room: RoomData }>(
-    `/api/rooms/${encodeURIComponent(roomId)}/return-lobby`,
-    sessionToken,
-    { method: 'POST' }
-  );
+  if (sessionToken) {
+    return apiRequest<{ room: RoomData }>(
+      `/api/rooms/${encodeURIComponent(roomId)}/return-lobby`,
+      sessionToken,
+      { method: 'POST' }
+    );
+  }
+  return firebaseGameApiRequest<{ room: RoomData }>('/api/game/action', {
+    roomId,
+    actionType: 'return_lobby',
+  });
 }

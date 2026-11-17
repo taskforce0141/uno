@@ -365,15 +365,15 @@
       "schema": { "$ref": "#/entities/GameState" },
       "description": "Public synchronized game state (server-authoritative)."
     },
-    "/rooms/{roomId}/game/hands/{playerId}": {
+    "/rooms/{roomId}/hands/{playerId}": {
       "schema": { "$ref": "#/entities/PlayerHand" },
       "description": "Private player card hand (owner-read only, server-write only)."
     },
-    "/rooms/{roomId}/game/actions/{actionId}": {
+    "/rooms/{roomId}/actions/{actionId}": {
       "schema": { "$ref": "#/entities/GameAction" },
       "description": "Audit log of submitted player actions."
     },
-    "/rooms/{roomId}/game/activity/{activityId}": {
+    "/rooms/{roomId}/activity/{activityId}": {
       "schema": { "$ref": "#/entities/GameActivity" },
       "description": "Game activity feed entries for room members."
     }

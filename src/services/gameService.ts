@@ -1,4 +1,5 @@
 import { CardColor, PublicGameState, RoomData, UnoCard } from '../engine/gameTypes';
+import { auth } from './firebase';
 import { API_BASE_URL, buildApiUrl } from './sessionService';
 
 export type SocketMessage =
@@ -6,6 +7,111 @@ export type SocketMessage =
   | { type: 'error'; message: string }
   | { type: 'kicked'; message: string }
   | { type: 'room_closed'; message: string };
+
+export interface FirebaseGameApiResponse {
+  success?: boolean;
+  room: RoomData;
+  gameState: PublicGameState | null;
+  hand: UnoCard[];
+}
+
+export async function firebaseGameApiRequest<T = FirebaseGameApiResponse>(
+  path: string,
+  body: Record<string, unknown>
+): Promise<T> {
+  const currentUser = auth.currentUser;
+  if (!currentUser) {
+    throw new Error('Authentication required. Please sign in and try again.');
+  }
+
+  let idToken: string;
+  try {
+    idToken = await currentUser.getIdToken();
+  } catch {
+    throw new Error('Unable to verify your Firebase session. Please refresh and sign in again.');
+  }
+
+  const targetUrl = buildApiUrl(path);
+  let res: Response;
+  try {
+    res = await fetch(targetUrl, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${idToken}`,
+      },
+      body: JSON.stringify(body),
+    });
+  } catch {
+    throw new Error('Network error contacting the UNO ARENA game server. Please try again.');
+  }
+
+  const contentType = res.headers.get('content-type') || '';
+  const text = await res.text();
+  let data: Record<string, unknown> | null = null;
+
+  if (text && (contentType.includes('application/json') || text.trim().startsWith('{'))) {
+    try {
+      data = JSON.parse(text) as Record<string, unknown>;
+    } catch {
+      throw new Error(`Invalid JSON response from game server (${res.status}).`);
+    }
+  } else if (!res.ok || contentType.includes('text/html')) {
+    throw new Error(
+      `Game API endpoint ${path} returned an unexpected response (${res.status}). Verify deployment and Firebase Admin configuration.`
+    );
+  }
+
+  if (!res.ok) {
+    const errMsg =
+      (data && typeof data.error === 'string' && data.error) ||
+      `Game server request failed (${res.status}).`;
+    throw new Error(errMsg);
+  }
+
+  if (!data) {
+    throw new Error(`Empty response from game server (${res.status}).`);
+  }
+
+  return data as unknown as T;
+}
+
+function getEndpointForGameAction(actionType: string): string {
+  switch (actionType) {
+    case 'play_cards':
+      return '/api/game/play-card';
+    case 'draw_card':
+      return '/api/game/draw-card';
+    case 'call_uno':
+    case 'catch_uno':
+      return '/api/game/call-uno';
+    case 'challenge_wild4':
+      return '/api/game/challenge';
+    case 'leave':
+      return '/api/game/leave';
+    default:
+      return '/api/game/action';
+  }
+}
+
+export async function submitFirebaseGameAction(
+  roomId: string,
+  actionType: string,
+  payload: Record<string, unknown> = {}
+): Promise<FirebaseGameApiResponse> {
+  const endpoint = getEndpointForGameAction(actionType);
+  const actionId =
+    typeof payload.actionId === 'string' && payload.actionId
+      ? payload.actionId
+      : `act_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+
+  return firebaseGameApiRequest<FirebaseGameApiResponse>(endpoint, {
+    roomId,
+    actionType,
+    actionId,
+    ...payload,
+  });
+}
 
 export function createGameWebSocket(
   roomId: string,

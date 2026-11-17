@@ -22,11 +22,11 @@ describe('UNO ARENA Firestore Security Rules Static & Policy Audit', () => {
   });
 
   it('locks private player hands so only owner can read and no client can write', () => {
-    expect(rules).toMatch(/match \/game\/hands\/\{playerId\}[\s\S]*allow get: if isValidId\(roomId\) && isValidId\(playerId\) && isOwner\(playerId\) && isRoomMember\(roomId\);[\s\S]*allow write: if false;/);
+    expect(rules).toMatch(/match \/hands\/\{playerId\}[\s\S]*allow get: if isValidId\(roomId\) && isValidId\(playerId\) && isOwner\(playerId\) && isRoomMember\(roomId\);[\s\S]*allow write: if false;/);
   });
 
   it('completely blocks client access to secret deck state', () => {
-    expect(rules).toMatch(/match \/game\/secret\/\{docId\}[\s\S]*allow read, write: if false;/);
+    expect(rules).toMatch(/match \/secret\/\{docId\}[\s\S]*allow read, write: if false;/);
   });
 
   it('enforces terminal state locking on closed rooms', () => {
