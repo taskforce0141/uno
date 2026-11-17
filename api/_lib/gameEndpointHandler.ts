@@ -1,33 +1,61 @@
-import { IncomingMessage } from 'node:http';
-import { ApiHttpError, verifyFirebaseBearerToken } from '../../src/server/firebaseAdmin.ts';
+import type { IncomingMessage } from 'node:http';
+import {
+  ApiHttpError,
+  getSafeAdminEnvStatus,
+  sanitizeLogMessage,
+  verifyFirebaseBearerToken,
+} from '../../src/server/firebaseAdmin.ts';
 
 export interface ServerlessRequest extends IncomingMessage {
   method?: string;
   body?: unknown;
+  url?: string;
   headers: Record<string, string | string[] | undefined>;
 }
 
 export interface ServerlessResponse {
-  status: (code: number) => ServerlessResponse;
-  json: (payload: unknown) => void;
+  status?: (code: number) => ServerlessResponse;
+  json?: (payload: unknown) => void;
+  statusCode?: number;
   setHeader: (name: string, value: string) => void;
   end: (body?: string) => void;
 }
 
-async function parseRequestBody(req: ServerlessRequest): Promise<Record<string, unknown>> {
-  if (req.body && typeof req.body === 'object' && !Buffer.isBuffer(req.body)) {
-    return req.body as Record<string, unknown>;
+function sendJsonResponse(res: ServerlessResponse, statusCode: number, payload: unknown): void {
+  res.setHeader('Content-Type', 'application/json');
+  res.setHeader('Cache-Control', 'no-store');
+  if (typeof res.status === 'function' && typeof res.json === 'function') {
+    const nextRes = res.status(statusCode);
+    if (nextRes && typeof nextRes.json === 'function') {
+      nextRes.json(payload);
+      return;
+    }
   }
-  if (typeof req.body === 'string' && req.body.trim()) {
+  res.statusCode = statusCode;
+  res.end(JSON.stringify(payload));
+}
+
+async function parseRequestBody(req: ServerlessRequest): Promise<Record<string, unknown>> {
+  let preParsedBody: unknown;
+  try {
+    preParsedBody = req.body;
+  } catch {
+    throw new ApiHttpError(400, 'Invalid JSON request body.');
+  }
+
+  if (preParsedBody && typeof preParsedBody === 'object' && !Buffer.isBuffer(preParsedBody)) {
+    return preParsedBody as Record<string, unknown>;
+  }
+  if (typeof preParsedBody === 'string' && preParsedBody.trim()) {
     try {
-      return JSON.parse(req.body) as Record<string, unknown>;
+      return JSON.parse(preParsedBody) as Record<string, unknown>;
     } catch {
       throw new ApiHttpError(400, 'Invalid JSON request body.');
     }
   }
-  if (Buffer.isBuffer(req.body) && req.body.length > 0) {
+  if (Buffer.isBuffer(preParsedBody) && preParsedBody.length > 0) {
     try {
-      return JSON.parse(req.body.toString('utf-8')) as Record<string, unknown>;
+      return JSON.parse(preParsedBody.toString('utf-8')) as Record<string, unknown>;
     } catch {
       throw new ApiHttpError(400, 'Invalid JSON request body.');
     }
@@ -56,28 +84,50 @@ export async function handleAuthenticatedPost(
   res.setHeader('Cache-Control', 'no-store');
 
   if (req.method === 'OPTIONS') {
-    res.status(204).end();
+    if (typeof res.status === 'function') {
+      res.status(204).end();
+    } else {
+      res.statusCode = 204;
+      res.end();
+    }
     return;
   }
 
   if (req.method !== 'POST') {
-    res.status(405).json({ error: 'Method not allowed. Use POST.' });
+    sendJsonResponse(res, 405, { error: 'Method not allowed. Use POST.' });
     return;
   }
 
   try {
-    const { uid } = await verifyFirebaseBearerToken(req.headers.authorization);
+    const authHeader = req.headers.authorization ?? req.headers.Authorization;
+    const { uid } = await verifyFirebaseBearerToken(authHeader);
     const body = await parseRequestBody(req);
     const result = await handler(uid, body);
-    res.status(200).json({ success: true, ...(result as Record<string, unknown>) });
+    sendJsonResponse(res, 200, { success: true, ...(result as Record<string, unknown>) });
   } catch (err) {
     if (err instanceof ApiHttpError) {
-      res.status(err.statusCode).json({ error: err.message });
+      if (err.statusCode >= 500) {
+        console.error('[UNO ARENA API 5xx]', {
+          url: req.url || 'unknown',
+          statusCode: err.statusCode,
+          message: sanitizeLogMessage(err),
+          env: getSafeAdminEnvStatus(),
+        });
+      }
+      sendJsonResponse(res, err.statusCode, { error: sanitizeLogMessage(err) });
       return;
     }
-    console.error('[UNO ARENA API Error]', err);
-    res.status(500).json({
-      error: err instanceof Error ? err.message : 'Unexpected server error processing game action.',
+
+    const safeMessage = sanitizeLogMessage(err);
+    console.error('[UNO ARENA API Unhandled 500]', {
+      url: req.url || 'unknown',
+      errorName: err instanceof Error ? err.name : 'Error',
+      errorCode: (err as { code?: string | number })?.code ?? null,
+      message: safeMessage,
+      env: getSafeAdminEnvStatus(),
+    });
+    sendJsonResponse(res, 500, {
+      error: safeMessage || 'Unexpected server error processing game action.',
     });
   }
 }

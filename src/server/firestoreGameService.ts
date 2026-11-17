@@ -1,5 +1,5 @@
 import { FieldValue, Timestamp } from 'firebase-admin/firestore';
-import {
+import type {
   CardColor,
   CustomRulesConfig,
   GameMode,

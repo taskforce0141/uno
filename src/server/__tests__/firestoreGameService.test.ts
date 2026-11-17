@@ -177,6 +177,16 @@ vi.mock('../firebaseAdmin', async () => {
     ApiHttpError,
     getFirebaseAdmin: () => ({ adminDb }),
     hasAdminCredentialsConfigured: () => true,
+    getSafeAdminEnvStatus: () => ({
+      projectId: 'unoa-f18c9',
+      databaseId: '(default)',
+      hasProjectId: true,
+      hasClientEmail: true,
+      hasPrivateKey: true,
+      privateKeyLooksValidPem: true,
+    }),
+    sanitizeLogMessage: (input: unknown) =>
+      input instanceof Error ? input.message : String(input ?? 'Unknown error'),
     verifyFirebaseBearerToken: async (header: string | string[] | undefined) => {
       if (mockAuthShouldFail || !header || !String(header).startsWith('Bearer ')) {
         throw new ApiHttpError(401, 'Unauthorized Firebase ID token.');

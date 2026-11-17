@@ -1,10 +1,8 @@
-import {
+import { DARK_COLORS, DEFAULT_CUSTOM_RULES, LIGHT_COLORS } from './gameTypes.ts';
+import type {
   CardColor,
   CustomRulesConfig,
-  DARK_COLORS,
-  DEFAULT_CUSTOM_RULES,
   FlipSide,
-  LIGHT_COLORS,
   ServerGameState,
 } from './gameTypes.ts';
 import { getCardFace } from './validation.ts';

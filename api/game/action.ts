@@ -1,13 +1,8 @@
-import {
-  handleAuthenticatedPost,
-  ServerlessRequest,
-  ServerlessResponse,
-} from '../_lib/gameEndpointHandler.ts';
+import { handleAuthenticatedPost } from '../_lib/gameEndpointHandler.ts';
+import type { ServerlessRequest, ServerlessResponse } from '../_lib/gameEndpointHandler.ts';
 import { ApiHttpError } from '../../src/server/firebaseAdmin.ts';
-import {
-  executeMatchActionInFirestore,
-  ServerGameActionType,
-} from '../../src/server/firestoreGameService.ts';
+import { executeMatchActionInFirestore } from '../../src/server/firestoreGameService.ts';
+import type { ServerGameActionType } from '../../src/server/firestoreGameService.ts';
 
 const ALLOWED_ACTIONS = new Set<ServerGameActionType>([
   'play_cards',

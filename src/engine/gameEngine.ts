@@ -1,10 +1,9 @@
-import {
+import { DARK_COLORS, LIGHT_COLORS } from './gameTypes.ts';
+import type {
   ActivityEntry,
   CardColor,
   CustomRulesConfig,
-  DARK_COLORS,
   GameMode,
-  LIGHT_COLORS,
   PlayerRecord,
   PublicGameState,
   PublicPlayerState,

@@ -1,4 +1,5 @@
-import { CustomRulesConfig, DEFAULT_CUSTOM_RULES, GameMode } from './gameTypes.ts';
+import { DEFAULT_CUSTOM_RULES } from './gameTypes.ts';
+import type { CustomRulesConfig, GameMode } from './gameTypes.ts';
 import { CLASSIC_RULES } from './classicUno.ts';
 import { FLIP_RULES } from './flipUno.ts';
 

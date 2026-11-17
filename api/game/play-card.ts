@@ -1,8 +1,5 @@
-import {
-  handleAuthenticatedPost,
-  ServerlessRequest,
-  ServerlessResponse,
-} from '../_lib/gameEndpointHandler.ts';
+import { handleAuthenticatedPost } from '../_lib/gameEndpointHandler.ts';
+import type { ServerlessRequest, ServerlessResponse } from '../_lib/gameEndpointHandler.ts';
 import { executeMatchActionInFirestore } from '../../src/server/firestoreGameService.ts';
 
 export default async function handler(

@@ -1,10 +1,9 @@
-import {
+import { DARK_COLORS, LIGHT_COLORS } from './gameTypes.ts';
+import type {
   CardFace,
   ClassicCardValue,
-  DARK_COLORS,
   FlipDarkValue,
   FlipLightValue,
-  LIGHT_COLORS,
   ServerGameState,
   UnoCard,
 } from './gameTypes.ts';

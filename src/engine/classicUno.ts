@@ -1,4 +1,5 @@
-import { CustomRulesConfig, DEFAULT_CUSTOM_RULES } from './gameTypes.ts';
+import { DEFAULT_CUSTOM_RULES } from './gameTypes.ts';
+import type { CustomRulesConfig } from './gameTypes.ts';
 
 export const CLASSIC_RULES: CustomRulesConfig = {
   ...DEFAULT_CUSTOM_RULES,

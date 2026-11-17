@@ -43,8 +43,10 @@ import {
   ApiHttpError,
   FIRESTORE_DATABASE_ID,
   getFirebaseAdmin,
+  getSafeAdminEnvStatus,
   hasAdminCredentialsConfigured,
   resetFirebaseAdminCache,
+  sanitizeLogMessage,
   verifyFirebaseBearerToken,
 } from '../firebaseAdmin';
 
@@ -79,6 +81,14 @@ describe('firebaseAdmin server initialization', () => {
     process.env.FIREBASE_PRIVATE_KEY = '"-----BEGIN PRIVATE KEY-----\\nLINE1\\nLINE2\\n-----END PRIVATE KEY-----\\n"';
 
     expect(hasAdminCredentialsConfigured()).toBe(true);
+    expect(getSafeAdminEnvStatus()).toEqual({
+      projectId: 'unoa-f18c9',
+      databaseId: '(default)',
+      hasProjectId: true,
+      hasClientEmail: true,
+      hasPrivateKey: true,
+      privateKeyLooksValidPem: true,
+    });
 
     const { adminDb } = getFirebaseAdmin();
     expect(FIRESTORE_DATABASE_ID).toBe('(default)');
@@ -102,5 +112,26 @@ describe('firebaseAdmin server initialization', () => {
     const verified = await verifyFirebaseBearerToken('Bearer test_token_123');
     expect(verified.uid).toBe('user_123');
     expect(mockVerifyIdToken).toHaveBeenCalledWith('test_token_123');
+  });
+
+  it('redacts private keys, bearer tokens, and JWTs from logs and wraps init errors as ApiHttpError(500)', () => {
+    const redacted = sanitizeLogMessage(
+      'Failed with -----BEGIN PRIVATE KEY-----\nSECRET\n-----END PRIVATE KEY----- Bearer abc.def.ghi eyJhbGciOiJIUzI1NiJ9.eyJ1aWQiOiIxMjMifQ.sig123'
+    );
+    expect(redacted).not.toContain('SECRET');
+    expect(redacted).not.toContain('abc.def.ghi');
+    expect(redacted).not.toContain('eyJhbGciOiJIUzI1NiJ9');
+
+    process.env.FIREBASE_PROJECT_ID = 'unoa-f18c9';
+    process.env.FIREBASE_CLIENT_EMAIL = 'firebase-adminsdk@unoa-f18c9.iam.gserviceaccount.com';
+    process.env.FIREBASE_PRIVATE_KEY = 'bad-key';
+    mockCert.mockImplementationOnce(() => {
+      throw new Error('Invalid PEM formatted private key');
+    });
+
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    expect(() => getFirebaseAdmin()).toThrowError(ApiHttpError);
+    expect(errorSpy).toHaveBeenCalled();
+    errorSpy.mockRestore();
   });
 });
